@@ -1,13 +1,14 @@
 # PyTorch with native sm_121/sm_121a on NVIDIA DGX Spark
 
-A from-source PyTorch build that produces the first wheel on this hardware (NVIDIA GB10, Grace + Blackwell, sm_121) with **native sm_121 and sm_121a cubins** — eliminating the runtime PTX-JIT path that every other PyTorch distribution falls back to on this hardware.
+A from-source PyTorch build that produces the first wheel on this hardware (NVIDIA GB10, Grace + Blackwell, sm_121) with **native sm_121 and sm_121a cubins** — eliminating the runtime PTX-JIT path that every other PyTorch distribution falls back to on this hardware. 
+
+NGC PyTorch container: [`nvcr.io/nvidia/pytorch:26.04-py3`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
 
 ## Why this build exists
 
 Empirically verified via `torch.cuda.get_arch_list()`:
-
 | Wheel | Compiled arch list |
-|---|---|---|
+|---|---|
 | PyPI `torch==2.9.0+cu130` | `sm_80, sm_90, sm_100, sm_110, sm_120, compute_120` |
 | NGC `pytorch:26.04-py3` (`torch 2.12.0a0+nv26.04`) | `sm_80, sm_86, sm_90, sm_100, sm_110, sm_120, compute_120` |
 | **This build (PyTorch 2.10.0)** | **`sm_121, sm_121a`** |
@@ -68,8 +69,3 @@ NGC ships triton 3.6.0 (the only stack where the Triton matmul test succeeds on 
 ## Potential Next Step
 
 AutoKernel ([arXiv:2603.21331](https://arxiv.org/abs/2603.21331)) agent-driven kernel-replacement methodology
-
-## References
-
-- NGC PyTorch container: [`nvcr.io/nvidia/pytorch:26.04-py3`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
-# blackwell_sm_121_experiment
