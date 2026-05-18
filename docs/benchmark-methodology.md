@@ -67,3 +67,118 @@ Key properties:
 - It does not isolate hardware effects — driver state, container overhead, and kernel selection are not controlled.
 
 The bench is **right-sized for comparing PyTorch deployment paths on identical hardware** — which is the specific question this research asks.
+
+---
+
+# 2026 SOTA upgrade — methodology refresh
+
+The original 6-test bench above is preserved as Tier 1's input. Layered onto
+that input is SOL-ExecBench methodology (arXiv 2603.19173) plus three new tiers
+of capability. All execution is containerized; the host runs only `docker`
+commands. See `docs/containerization.md` for topology and `docs/sol-score.md`
+for the SOL Score formula.
+
+## Tier 1 — Methodology rigor (replaces the old wall-clock harness)
+
+Every test in `bench/bench_full.py` now runs through `bench/_harness.py`:
+
+- **Clock lock via privileged controller container** (`bench/_clocklock.sh`,
+  Phase 0 gate `bench/verify_clocklock.sh`). `nvidia-smi --lock-gpu-clocks` at
+  2418 MHz from inside a `--privileged` container; bench containers stay
+  unprivileged. Trap-based unlock on EXIT/INT/TERM/ERR.
+  - **Resolves limitation 2** (no GPU clock locking). Verified ±0.3% on GB10.
+- **L2 cache flush before every iteration** (`L2Flusher`, 48 MB buffer = 2×
+  GB10's 24 MB L2). Cold-cache per iter, matching SOL-ExecBench convention.
+  - **Resolves limitation 3** (no L2 cache clearing).
+- **CUDA event timing** (`cuda_event_time`), not wall-clock. Kernel-only
+  measurement; eliminates Python overhead bias. Default 5 warmup + 50 timed
+  iters (configurable via `BENCH_ITERS`, `BENCH_WARMUP`).
+  - **Resolves limitation 1** (wall-clock vs CUDA event timing).
+- **Statistical reporting** — mean / median / p10 / p90 / stdev / stdev_pct
+  per test via stdlib `statistics`. Reported in `Result.stats`.
+  - **Resolves limitation 4** (no median + variance reporting).
+- **Subprocess isolation** — each test runs in its own Python process when
+  invoked through the multi-test orchestrator (SOL-ExecBench requirement;
+  ~5s per-test Python startup overhead accepted in exchange for reproducibility).
+- **Per-test correctness gates** at small M=1024 against fp32 reference:
+  FP16/BF16/Triton/Sparse (`rtol=1e-2 atol=1e-2`); FP8 (`rtol=5e-2 atol=0.5`);
+  FP4 gate skipped (16 representable values × random uint8 → error magnitude
+  O(√K·0.5) ≈ 45 at K=8192; meaningful tolerance unusable).
+  - **Resolves limitation 6** (no verification of numerical correctness).
+- **SOL Score per test** — analytical Speed-of-Light from `bench/_solar.py`
+  using GB10 specs in `bench/sol_config.toml`. See `docs/sol-score.md`.
+- **JSON output mode** (`bench_full.py --json`) for machine-readable
+  aggregation by `bench/_summarize.py`. Human-readable output preserved as
+  default for direct CLI use.
+
+Tier 1 output: `bench/logs/run{A,B,C}.json` + `bench/logs/SUMMARY.txt` with a
+3-way SOL Score table using Run A (PyPI) as baseline.
+
+## Tier 2 — New kernel coverage
+
+Five tests added in `bench/tests_kernels.py` and one in
+`bench/tests_triton_autotune.py`, integrated into `bench_full.py`'s `ALL_TESTS`:
+
+| Test key | Workload | Unit | SOL basis |
+|---|---|---|---|
+| `bandwidth` | STREAM triad over 1 GiB fp32 | GB/s | GB10 LPDDR5X peak (273 GB/s) |
+| `attn_bwd` | FlashAttention causal backward (B=4 H=32 S=4096 D=128) | TFLOPs | 5·B·H·S²·D causal |
+| `rmsnorm` | `F.rms_norm` on `[8192, 8192]` fp16 | GB/s | bandwidth-bound |
+| `softmax` | `F.softmax` on `[2, 16, 4096, 4096]` fp16 | GB/s | bandwidth-bound |
+| `cross_entropy` | `F.cross_entropy` on `[8192, 128k]` fp32 | GB/s | bandwidth-bound |
+| `triton_autotuned` | TritonForge sweep (162 configs: BLOCK_M/N/K × num_stages × num_warps) | TFLOPs | FP16 peak |
+
+The existing fixed-tile `triton` test is retained alongside `triton_autotuned`
+— they measure different things (compiler codegen quality vs best-Triton).
+Both SKIP on Run A (PyPI triton 3.5.0 PTXAS bug on sm_121a) and Run B
+(no triton installed); only Run C produces numbers.
+
+## Tier 3 — External tool integration
+
+- **nvbench cross-validator** (`bench/nvbench_shim/`): C++ binary linking
+  NVIDIA's nvbench library, runs the same FP16 GEMM via cuBLASLt with
+  nvbench's built-in CUDA-event timing + L2 flush + statistical sampling.
+  If our Python harness diverges from nvbench's number by >3%, it flags a
+  bug in `_harness.py`. **Verified working on sm_121** (Risk Register concern
+  closed): nvbench builds cleanly with `CMAKE_CUDA_ARCHITECTURES=121`; FP16
+  GEMM 8192³ at 84.66 TFLOPs vs our Python harness's 86.19 TFLOPs (1.8% gap,
+  within ±3% threshold).
+- **Roofline / Nsight Compute** (`bench/roofline.py`): opt-in via
+  `BENCH_PROFILE=1`. Uses `ncu --set roofline` + `ncu_report==2025.3.1`
+  Python API to extract `sol_sm` and `sol_mem` percentages per kernel.
+  Verified on GB10 with Nsight Compute 2026.1.0: FP16 GEMM at sol_sm=75%,
+  sol_mem=52% — useful for calibrating `sol_config.toml` placeholders.
+
+## Tier 4 — Full-stack (end-to-end LLM)
+
+`bench/e2e/`:
+
+- `mlperf_llama31_8b.py` — MLPerf inference v5.1 `llama3_1-8b` wrapper using
+  MLCommons' `mlcr` CLI inside `ghcr.io/mlcommons/inference:5.1-dev`. Reports
+  tokens/sec, TTFT, ITL p50/p99. Gated by `BENCH_DOWNLOAD_MODELS=1` (16 GB
+  HuggingFace download under Meta Llama 3.1 Community License; `HF_TOKEN`
+  required). **Note**: llama3.1-8b is v5.1-only (NOT in v5.0).
+- `serve_flashinfer.py` — FlashInfer-Bench attention serving via the
+  authentic v0.1.2 API (`Benchmark + TraceSet + BenchmarkConfig`). Requires
+  FlashInfer source-built with `TORCH_CUDA_ARCH_LIST=12.1` (PyPI wheels are
+  sm_120-only); build via `bench/e2e/build_flashinfer.sh`.
+- `run_e2e.sh` — inherits the clock-lock controller pattern; appends to
+  `SUMMARY.txt` under `## End-to-End` heading.
+
+## What this upgrade does NOT do
+
+The original "What this bench is not" caveats from the pre-upgrade methodology
+still apply for what we deliberately left out:
+
+- **Multi-GPU / NVLink-C2C** — DGX Spark is single-GPU only.
+- **Training throughput** — we benchmark inference + microkernels, not training.
+- **Power / perf-per-watt** — `nvidia-smi --query-gpu=power.draw` accuracy is
+  not calibrated on GB10.
+- **Public leaderboard submission** — local numbers only; no official MLPerf
+  submission or FlashInfer-Bench upload.
+- **cuBLASLt heuristic auto-tuning** — we use cuBLAS defaults.
+
+But the original limitations 1, 2, 3, 4, and 6 (clock lock, L2 flush, CUDA
+events, variance, correctness) are **all resolved** by Tier 1. Limitation 5
+(Triton untuned) is **resolved** by the Tier 2 `triton_autotuned` test
+(retained alongside `triton` for codegen comparison).

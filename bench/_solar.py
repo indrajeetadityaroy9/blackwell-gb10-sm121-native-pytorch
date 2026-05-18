@@ -1,0 +1,167 @@
+"""
+SOLAR — analytical Speed-of-Light bounds for DGX Spark GB10.
+
+Based on SOL-ExecBench methodology (arXiv 2603.19173): for each kernel,
+the theoretical maximum throughput is the lower of:
+  - compute-bound rate (peak TFLOPs for the operand dtype)
+  - bandwidth-bound rate (peak GB/s × FLOPs / bytes moved)
+
+SOL = throughput at the limiting resource. SOL Score = how much of the
+(measured-baseline) → SOL gap a wheel closes, in [0, 1].
+
+Reads `sol_config.toml` from the same directory. Stdlib-only (no numpy / no toml).
+Python 3.11+ has tomllib built in; older versions need a fallback.
+"""
+
+from __future__ import annotations
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # torch 2.9 container ships Python 3.10 — fall back to a minimal parser
+    raise RuntimeError(
+        "bench/_solar.py requires Python 3.11+ (for tomllib). "
+        "Container Python is too old."
+    )
+
+
+_CFG_PATH = Path(__file__).parent / "sol_config.toml"
+
+
+@dataclass(frozen=True)
+class GB10Config:
+    sm: str
+    sm_count: int
+    l2_cache_mb: int
+    unified_mem_gb: float
+    mem_bandwidth_tb_s: float
+    peak_tflops: dict[str, float]
+
+
+def load_config(path: Path = _CFG_PATH) -> GB10Config:
+    with open(path, "rb") as fh:
+        raw = tomllib.load(fh)
+    g = raw["gb10"]
+    return GB10Config(
+        sm=g["sm"],
+        sm_count=int(g["sm_count"]),
+        l2_cache_mb=int(g["l2_cache_mb"]),
+        unified_mem_gb=float(g["unified_mem_gb"]),
+        mem_bandwidth_tb_s=float(g["mem_bandwidth_tb_s"]),
+        peak_tflops={k: float(v) for k, v in g["peak_tflops"].items()},
+    )
+
+
+# Bytes per element, including the packed sub-byte types torch exposes.
+# float4_e2m1fn_x2 packs 2 fp4 values per byte → 0.5 bytes per logical element.
+_BYTES_PER_ELEM = {
+    "fp16": 2.0, "bf16": 2.0,
+    "fp32": 4.0, "fp64": 8.0,
+    "fp8": 1.0, "fp8_e4m3fn": 1.0, "fp8_e5m2": 1.0,
+    "fp4": 0.5, "float4_e2m1fn_x2": 0.5,
+    "int8": 1.0, "uint8": 1.0,
+}
+
+
+def bytes_per_elem(dtype: str) -> float:
+    if dtype not in _BYTES_PER_ELEM:
+        raise KeyError(
+            f"unknown dtype '{dtype}' for SOLAR (valid: {list(_BYTES_PER_ELEM)})"
+        )
+    return _BYTES_PER_ELEM[dtype]
+
+
+@dataclass(frozen=True)
+class SOL:
+    """Analytical SOL with a breakdown of which resource bounds it."""
+    sol_tflops: float            # SOL throughput (TFLOPs for compute / effective for bandwidth)
+    sol_gbs: float | None        # bandwidth in GB/s if test is bandwidth-bound; else None
+    compute_bound_s: float       # time if only compute-limited (seconds)
+    bandwidth_bound_s: float     # time if only bandwidth-limited (seconds)
+    limit: str                   # "compute" or "bandwidth"
+
+
+def gemm_sol(M: int, N: int, K: int, dtype: str, cfg: GB10Config,
+             out_bytes_per_elem: float = 2.0) -> SOL:
+    """
+    SOL for a dense GEMM (M,K) @ (K,N) → (M,N).
+    Bytes moved: read A (M·K·bpe) + read B (K·N·bpe) + write C (M·N·out_bpe).
+    """
+    flops = 2.0 * M * N * K
+    bpe = bytes_per_elem(dtype)
+    bytes_ = bpe * (M * K + K * N) + out_bytes_per_elem * (M * N)
+    peak_tflops = cfg.peak_tflops.get(dtype)
+    if peak_tflops is None:
+        raise KeyError(f"sol_config.toml has no peak_tflops['{dtype}'] entry")
+    compute_s = flops / (peak_tflops * 1e12)
+    bandwidth_s = bytes_ / (cfg.mem_bandwidth_tb_s * 1e12)
+    if compute_s >= bandwidth_s:
+        sol_tflops = peak_tflops
+        limit = "compute"
+    else:
+        sol_tflops = flops / bandwidth_s / 1e12
+        limit = "bandwidth"
+    return SOL(sol_tflops=sol_tflops, sol_gbs=None,
+               compute_bound_s=compute_s, bandwidth_bound_s=bandwidth_s,
+               limit=limit)
+
+
+def attn_sol(B: int, H: int, S: int, D: int, dtype: str, cfg: GB10Config,
+             causal: bool = True, backward: bool = False) -> SOL:
+    """
+    SOL for FlashAttention-style fused attention.
+    Forward FLOPs:  causal=False -> 4·B·H·S²·D;  causal=True -> 2·B·H·S²·D
+    Backward FLOPs: ~2.5x forward (3 GEMM-equivalents); causal halves both
+    Bytes:          4·B·H·S·D (Q,K,V,O) + softmax intermediate (small at long S)
+    """
+    fwd_flops = (2.0 if causal else 4.0) * B * H * S * S * D
+    flops = fwd_flops * (2.5 if backward else 1.0)  # 5/2 fwd-equivalents for bwd
+    bpe = bytes_per_elem(dtype)
+    bytes_ = bpe * 4 * B * H * S * D
+    peak_tflops = cfg.peak_tflops.get(dtype, cfg.peak_tflops.get("fp16"))
+    compute_s = flops / (peak_tflops * 1e12)
+    bandwidth_s = bytes_ / (cfg.mem_bandwidth_tb_s * 1e12)
+    if compute_s >= bandwidth_s:
+        sol_tflops = peak_tflops
+        limit = "compute"
+    else:
+        sol_tflops = flops / bandwidth_s / 1e12
+        limit = "bandwidth"
+    return SOL(sol_tflops=sol_tflops, sol_gbs=None,
+               compute_bound_s=compute_s, bandwidth_bound_s=bandwidth_s,
+               limit=limit)
+
+
+def bandwidth_sol_gbs(cfg: GB10Config) -> float:
+    """SOL ceiling for bandwidth-bound tests (rmsnorm/softmax/CE/stream).
+    Reported in GB/s, not TFLOPs."""
+    return cfg.mem_bandwidth_tb_s * 1000.0
+
+
+def sol_score(measured: float, baseline: float, sol: float) -> float:
+    """
+    SOL-ExecBench eq.: fraction of the (baseline → SOL) gap a wheel closes.
+    Score ∈ [0, 1]. 0 = matches baseline, 1 = reaches SOL bound.
+    If SOL ≤ baseline (data missing / SOL placeholder too low), returns 0.
+    """
+    if sol <= baseline:
+        return 0.0
+    return max(0.0, min(1.0, (measured - baseline) / (sol - baseline)))
+
+
+# Self-test: load config and print one SOL example.
+if __name__ == "__main__":
+    cfg = load_config()
+    print(f"loaded sol_config.toml for {cfg.sm}, {cfg.sm_count} SMs")
+    print(f"  mem_bandwidth = {cfg.mem_bandwidth_tb_s * 1000:.1f} GB/s")
+    print(f"  peak_tflops   = {cfg.peak_tflops}")
+    s = gemm_sol(8192, 8192, 8192, "fp16", cfg)
+    print(f"  FP16 8192^3 GEMM SOL: {s.sol_tflops:.1f} TFLOPs (limit={s.limit})")
+    s = gemm_sol(8192, 8192, 8192, "fp8", cfg)
+    print(f"  FP8  8192^3 GEMM SOL: {s.sol_tflops:.1f} TFLOPs (limit={s.limit})")
+    s = gemm_sol(8192, 8192, 8192, "fp4", cfg)
+    print(f"  FP4  8192^3 GEMM SOL: {s.sol_tflops:.1f} TFLOPs (limit={s.limit})")
+    print(f"  bandwidth SOL: {bandwidth_sol_gbs(cfg):.1f} GB/s")
+    print(f"  sol_score(measured=82, baseline=56.8, sol=90) = {sol_score(82, 56.8, 90):.3f}")
