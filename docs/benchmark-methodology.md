@@ -149,21 +149,31 @@ Both SKIP on Run A (PyPI triton 3.5.0 PTXAS bug on sm_121a) and Run B
   Verified on GB10 with Nsight Compute 2026.1.0: FP16 GEMM at sol_sm=75%,
   sol_mem=52% — useful for calibrating `sol_config.toml` placeholders.
 
-## Tier 4 — Full-stack (end-to-end LLM)
+## Tier 4 (experimental) — Full-stack end-to-end LLM
 
-`bench/e2e/`:
+**Out of scope for hardware benchmarking** — moved to `bench/experimental/`
+and not exercised by `run_bakeoff.sh`. These workloads measure software-stack
+throughput (vLLM scheduler, KV cache layout, tokenizer batching, attention
+engine choice) rather than GB10 hardware capability. Tiers 1-3 already cover
+the hardware-level questions this repo cares about.
 
-- `mlperf_llama31_8b.py` — MLPerf inference v5.1 `llama3_1-8b` wrapper using
-  MLCommons' `mlcr` CLI inside `ghcr.io/mlcommons/inference:5.1-dev`. Reports
-  tokens/sec, TTFT, ITL p50/p99. Gated by `BENCH_DOWNLOAD_MODELS=1` (16 GB
-  HuggingFace download under Meta Llama 3.1 Community License; `HF_TOKEN`
-  required). **Note**: llama3.1-8b is v5.1-only (NOT in v5.0).
-- `serve_flashinfer.py` — FlashInfer-Bench attention serving via the
-  authentic v0.1.2 API (`Benchmark + TraceSet + BenchmarkConfig`). Requires
-  FlashInfer source-built with `TORCH_CUDA_ARCH_LIST=12.1` (PyPI wheels are
-  sm_120-only); build via `bench/e2e/build_flashinfer.sh`.
-- `run_e2e.sh` — inherits the clock-lock controller pattern; appends to
-  `SUMMARY.txt` under `## End-to-End` heading.
+Kept as reference scaffolding for two adjacent research questions a future
+follow-up might pursue:
+
+- `bench/experimental/mlperf_llama31_8b.py` — MLPerf inference v5.1
+  `llama3_1-8b` wrapper using MLCommons' `mlcr` CLI inside
+  `ghcr.io/mlcommons/inference:5.1-dev`. Reports tokens/sec, TTFT, ITL p50/p99.
+  Gated by `BENCH_DOWNLOAD_MODELS=1` (16 GB HuggingFace download under Meta
+  Llama 3.1 Community License; `HF_TOKEN` required). Useful if you want
+  "first publicly-reported GB10 MLPerf v5.1 numbers" as a separate artifact.
+  **Note**: llama3.1-8b is v5.1-only (NOT in v5.0).
+- `bench/experimental/serve_flashinfer.py` — FlashInfer-Bench attention serving
+  via the authentic v0.1.2 API (`Benchmark + TraceSet + BenchmarkConfig`).
+  Requires FlashInfer source-built with `TORCH_CUDA_ARCH_LIST=12.1` (PyPI
+  wheels are sm_120-only); build via
+  `bench/experimental/build_flashinfer.sh` (~30-60 min cold).
+- `bench/experimental/run_e2e.sh` — driver script if you ever want to run both;
+  inherits the same clock-lock controller pattern as `run_bakeoff.sh`.
 
 ## What this upgrade does NOT do
 

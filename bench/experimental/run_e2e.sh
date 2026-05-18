@@ -62,17 +62,17 @@ if docker run --rm -v dgx-spark-build-strict:/v alpine \
       pip install -q "$(ls /work/pytorch/dist/torch-*.whl | head -1)"
       pip install -q "$(ls /work/flashinfer/dist/flashinfer*.whl | head -1)"
       pip install -q flashinfer-bench==0.1.2
-      python /repo/bench/e2e/serve_flashinfer.py --json > /logs/flashinfer.json 2>>/logs/flashinfer.log
+      python /repo/bench/experimental/serve_flashinfer.py --json > /logs/flashinfer.json 2>>/logs/flashinfer.log
     ' >>"$LOGS/flashinfer.log" 2>&1
   log "flashinfer exit: $?"
 else
-  log "Tier 4 / FlashInfer: SKIPPED (run bench/e2e/build_flashinfer.sh first)"
+  log "Tier 4 / FlashInfer: SKIPPED (run bench/experimental/build_flashinfer.sh first)"
 fi
 
 # --- MLPerf v5.1 ---
 log "Tier 4 / MLPerf v5.1 llama3.1-8b"
 if [[ "${BENCH_DOWNLOAD_MODELS:-0}" == "1" ]]; then
-  python3 "$REPO_DIR/bench/e2e/mlperf_llama31_8b.py" \
+  python3 "$REPO_DIR/bench/experimental/mlperf_llama31_8b.py" \
     --scenario Offline --duration 60 --out "$LOGS/mlperf_llama31_8b.json"
   log "mlperf exit: $?"
 else

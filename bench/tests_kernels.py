@@ -1,14 +1,14 @@
 """
-Tier 2 — new kernel tests beyond the original 6 GEMM/attention micro-benchmarks.
-All tests use the same SOL-ExecBench timing harness from _harness.py.
+Tier 2 — additional kernel tests beyond the original 6 GEMM/attention benchmarks.
+All use the SOL-ExecBench harness from _harness.py.
 
-  bandwidth      Grace LPDDR5X memory bandwidth (cudaMemcpyAsync D→D + triad)
+  bandwidth      Grace LPDDR5X memory bandwidth (triad)
   attn_bwd       FlashAttention backward (5·B·H·S²·D causal)
-  rmsnorm        F.rms_norm (bandwidth-bound; AutoKernel cited 5× over eager)
+  rmsnorm        F.rms_norm (bandwidth-bound)
   softmax        F.softmax over [B, H, S, S]
-  cross_entropy  F.cross_entropy over [N, V=128k] — common LLM bottleneck
+  cross_entropy  F.cross_entropy over [N, V=128k]
 
-Each test returns a Result; integrated into bench_full.py's ALL_TESTS dict.
+Each test returns a Result; merged into bench_full.py ALL_TESTS.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def _skip(name: str, reason: str, unit: str = "TFLOPs") -> Result:
 def _bandwidth_result(name: str, fn: Callable, *, bytes_moved: float,
                       correctness: str | None = None,
                       extra: dict | None = None) -> Result:
-    """Time a bandwidth-bound kernel; report GB/s. SOL = LPDDR5X peak."""
+    """Time a bandwidth-bound kernel; report GB/s vs LPDDR5X peak."""
     try:
         stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
     except Exception as e:
@@ -73,12 +73,8 @@ def _bandwidth_result(name: str, fn: Callable, *, bytes_moved: float,
 # -------------------- bandwidth (Grace LPDDR5X) --------------------
 
 def test_bandwidth() -> Result:
-    """
-    Two-part memory bandwidth test:
-      1. Triad `c = a + α·b` over 1 GiB fp32 (3 arrays × 1 GiB = 3 GiB moved/iter)
-         This is the STREAM triad pattern — pure memory throughput.
-      2. Reported GB/s should approach GB10's 273 GB/s LPDDR5X spec.
-    """
+    """STREAM triad `c = a + α·b` over 1 GiB fp32 (3 GiB moved/iter).
+    Reported GB/s should approach GB10's 273 GB/s LPDDR5X spec."""
     name = "lpddr5x_triad_1gib"
     N_BYTES = 1 << 30   # 1 GiB
     n = N_BYTES // 4    # fp32 elements
@@ -89,7 +85,7 @@ def test_bandwidth() -> Result:
         alpha = 3.0
     except Exception as e:
         return _skip(name, f"setup: {e}", unit="GB/s")
-    # triad: read a, read b, write c → 3 arrays × N_BYTES
+    # triad: read a + read b + write c = 3 × N_BYTES
     fn = lambda: torch.add(a, b, alpha=alpha, out=c)
     return _bandwidth_result(name, fn, bytes_moved=3 * N_BYTES,
                               extra={"shape": [n], "dtype": "fp32"})
@@ -98,10 +94,8 @@ def test_bandwidth() -> Result:
 # -------------------- FlashAttention backward --------------------
 
 def test_attn_bwd() -> Result:
-    """
-    FlashAttention causal backward. FLOPs = 5·B·H·S²·D (causal halves):
-    forward 2 GEMM-equivalents + backward 3 GEMM-equivalents (dQ, dK, dV).
-    """
+    """FlashAttention causal backward.
+    FLOPs = 5·B·H·S²·D (forward 2 + backward 3 GEMM-equivalents, both causally halved)."""
     B, H, S, D = 4, 32, 4096, 128
     name = f"flash_attn_bwd_B{B}H{H}S{S}D{D}_causal"
 
@@ -111,7 +105,7 @@ def test_attn_bwd() -> Result:
         flash_fn = flash_attn_func
         layout = "BSHD"  # (B, S, H, D)
     except ImportError:
-        # Fall back to torch SDPA-flash (supports backward natively)
+        # Fall back to torch SDPA-flash (backward supported)
         from torch.nn.attention import SDPBackend, sdpa_kernel
         flash_fn = None
         layout = "BHSD"
@@ -150,7 +144,7 @@ def test_attn_bwd() -> Result:
         stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
     except Exception as e:
         return _skip(name, f"{type(e).__name__}: {str(e)[:240]}")
-    flops_per_call = 5.0 * B * H * S * S * D  # causal already halved (2+3)
+    flops_per_call = 5.0 * B * H * S * S * D  # 2 fwd + 3 bwd, causally halved
     median_s = stats.median_ms / 1000.0
     tflops = flops_per_call / median_s / 1e12
     sol = attn_sol(B, H, S, D, "fp16", _cfg(), causal=True, backward=True)
@@ -166,10 +160,8 @@ def test_attn_bwd() -> Result:
 # -------------------- RMSNorm (bandwidth-bound) --------------------
 
 def test_rmsnorm() -> Result:
-    """
-    F.rms_norm on [N=8192, H=8192] fp16.
-    Bandwidth: read 1 array, write 1 array → 2 × N·H·2 bytes per iter.
-    """
+    """F.rms_norm on [N=8192, H=8192] fp16.
+    Bytes: 2 × N·H·2 (read + write) + H·2 (weight)."""
     name = "rmsnorm_N8192_H8192_fp16"
     if not hasattr(F, "rms_norm"):
         return _skip(name, "F.rms_norm not available (need torch 2.6+)", unit="GB/s")
@@ -187,7 +179,7 @@ def test_rmsnorm() -> Result:
     except Exception as e:
         correctness = f"FAIL: {type(e).__name__}: {e}"
     fn = lambda: F.rms_norm(x, [H_], weight=w)
-    bytes_moved = 2 * N_ * H_ * 2 + H_ * 2   # x in + out + weight
+    bytes_moved = 2 * N_ * H_ * 2 + H_ * 2   # x + out + weight
     return _bandwidth_result(name, fn, bytes_moved=bytes_moved,
                               correctness=correctness,
                               extra={"shape": [N_, H_], "dtype": "fp16"})
@@ -196,10 +188,8 @@ def test_rmsnorm() -> Result:
 # -------------------- Softmax (bandwidth-bound) --------------------
 
 def test_softmax() -> Result:
-    """
-    F.softmax on [B=2, H=16, S=4096, S=4096] fp16 (attention-shape).
-    Bandwidth: read+write the [B,H,S,S] tensor → 2 × B·H·S·S·2 bytes.
-    """
+    """F.softmax on attention-shape [B=2, H=16, S=4096, S=4096] fp16.
+    Bytes: 2 × B·H·S·S·2 (read + write)."""
     name = "softmax_B2H16S4096_fp16"
     B_, H_, S_ = 2, 16, 4096
     try:
@@ -222,11 +212,8 @@ def test_softmax() -> Result:
 # -------------------- Cross-entropy (LLM bottleneck) --------------------
 
 def test_cross_entropy() -> Result:
-    """
-    F.cross_entropy on [N=8192, V=128k] fp32 logits, int64 targets.
-    Common LLM training/inference bottleneck — read full vocab logits per token.
-    Bandwidth: read N·V·4 bytes (logits) + N·8 bytes (targets) → dominated by logits.
-    """
+    """F.cross_entropy on [N=8192, V=128k] fp32 logits + int64 targets.
+    Bytes: N·V·4 (logits) + N·8 (targets) — logit read dominates."""
     name = "cross_entropy_N8192_V128k"
     N_, V_ = 8192, 128 * 1024
     try:
@@ -244,13 +231,13 @@ def test_cross_entropy() -> Result:
     except Exception as e:
         correctness = f"FAIL: {type(e).__name__}: {e}"
     fn = lambda: F.cross_entropy(logits, targets)
-    bytes_moved = N_ * V_ * 4 + N_ * 8   # logits + targets read
+    bytes_moved = N_ * V_ * 4 + N_ * 8   # logits + targets
     return _bandwidth_result(name, fn, bytes_moved=bytes_moved,
                               correctness=correctness,
                               extra={"N": N_, "V": V_, "dtype": "fp32"})
 
 
-# Export dict mapping test_key -> callable, consumed by bench_full.py ALL_TESTS
+# test_key → callable, merged into bench_full.py ALL_TESTS
 TESTS: dict[str, Callable[[], Result]] = {
     "bandwidth": test_bandwidth,
     "attn_bwd": test_attn_bwd,

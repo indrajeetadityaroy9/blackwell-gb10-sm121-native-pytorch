@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
-# 3-way DGX Spark bake-off with SOL-ExecBench methodology (arXiv 2603.19173):
-#  A : PyPI baseline    torch==2.9.0+cu130       (cuda:13.0.0-devel-ubuntu24.04)
-#  B : Source-built wheel sm_121 native cubins   (volume: dgx-spark-build-strict)
-#  C : NGC vendor reference                       (pytorch:26.04-py3)
+# 3-way DGX Spark bake-off — SOL-ExecBench methodology (arXiv 2603.19173).
+#   A : PyPI torch==2.9.0+cu130             (cuda:13.0.0-devel)
+#   B : Source-built wheel, native sm_121   (volume dgx-spark-build-strict)
+#   C : NGC pytorch:26.04-py3
 #
 # All execution inside Docker:
-#  - Dedicated --privileged controller container holds GPU clock lock for the
-#    entire bake-off; trap-based unlock fires on any exit.
-#  - Each test runs in its own Python subprocess (SOL-ExecBench isolation).
-#  - Triton autotune cache persists per-container via bind mount
-#    (sm_120 ≠ sm_121 backend.hash() — caches must not cross arches).
-#  - JSON emitted per wheel; bench/_summarize.py builds the final SUMMARY.txt
-#    with SOL Score per (wheel × test) using Run A as the baseline.
+#  - --privileged controller holds GPU clock lock; trap-based unlock on exit
+#  - Subprocess-per-test isolation (SOL-ExecBench)
+#  - Triton cache per-container (sm_120 ≠ sm_121 backend.hash())
+#  - Per-wheel JSON aggregated by bench/_summarize.py into SUMMARY.txt
 #
 # Env passthrough:
-#   BENCH_ONLY      e.g. "fp4" — pass to each run as --only
-#   BENCH_GPU_MHZ   GPU clock lock target (default 2418 = GB10 Default Applications)
-#   BENCH_ITERS     timed iterations per test (default 50)
-#   BENCH_WARMUP    warmup iterations per test (default 5)
-#   BENCH_M         GEMM dimension (default 8192)
-#   BENCH_PROFILE   set to 1 to also collect ncu_report roofline data (Tier 3, opt-in)
+#   BENCH_ONLY      same as --only (e.g. "fp4")
+#   BENCH_GPU_MHZ   clock-lock target (default 2418)
+#   BENCH_ITERS     timed iters per test (default 50)
+#   BENCH_WARMUP    warmup iters (default 5)
+#   BENCH_M         GEMM dim (default 8192)
+#   BENCH_PROFILE   1 → also collect ncu roofline data (Tier 3 opt-in)
 
 set -uo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,9 +36,9 @@ for v in BENCH_ONLY BENCH_ITERS BENCH_WARMUP BENCH_M BENCH_PROFILE; do
   [[ -n "${!v:-}" ]] && DOCKER_ENV+=(-e "$v=${!v}")
 done
 
-# ---------- clock-lock controller container ----------
-# Spawned --privileged so NVML can lock GPU clocks. Bench containers stay
-# unprivileged. Trap-based cleanup catches Ctrl+C / crash / normal exit.
+# ---------- clock-lock controller ----------
+# --privileged so NVML can lock GPU clocks; bench containers stay unprivileged.
+# Trap catches Ctrl+C / crash / normal exit.
 cleanup() {
   local rc=$?
   log "cleanup: stopping clock-lock controller"
@@ -146,6 +143,6 @@ log "building SUMMARY.txt (3-way SOL Score table)"
 python3 "$REPO_DIR/bench/_summarize.py" "$LOGS" || true
 log "exit codes: A=${A_RC}  B=${B_RC}  C=${C_RC}"
 
-# Repair log ownership (root inside container → host user)
+# Fix log ownership (root inside container → host user)
 chown -R "$(id -u):$(id -g)" "$LOGS" 2>/dev/null || true
 log "Done. See $LOGS/SUMMARY.txt"

@@ -1,18 +1,14 @@
-# Build an nvbench-linked GEMM benchmark for sm_121 cross-validation
-# of the Python harness. nvbench provides built-in CUDA-event timing,
-# L2 flush, and statistical sampling — if our Python numbers diverge
-# from nvbench's by >3%, we have a bug in _harness.py.
+# nvbench-linked GEMM benchmark for cross-validating the Python harness.
+# Divergence > 3% from nvbench means a bug in _harness.py.
 cmake_minimum_required(VERSION 3.20)
 project(sm121_gemm LANGUAGES CXX CUDA)
 
-# GB10 only. No PTX fallback — failure here is an explicit signal that nvbench
-# doesn't yet support sm_121 (per Risk Register), not a silently degraded build.
+# GB10 only — no PTX fallback. A build failure flags missing sm_121 support.
 set(CMAKE_CUDA_ARCHITECTURES 121)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 
-# Pull nvbench. Pinned to a recent main commit (2026-05) since v0.2.0 (Feb 2026)
-# is the last tagged release and we want fixes for Blackwell SASS metrics.
+# nvbench main (post-v0.2.0) for Blackwell SASS metric fixes.
 include(FetchContent)
 FetchContent_Declare(
   nvbench

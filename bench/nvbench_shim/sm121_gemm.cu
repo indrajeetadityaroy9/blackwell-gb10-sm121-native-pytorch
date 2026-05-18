@@ -1,12 +1,9 @@
-// nvbench shim: FP16 GEMM 8192^3 via cuBLAS, used to cross-validate the
-// Python harness in bench/_harness.py. If the two report numbers differing
-// by more than 3%, the Python harness has a bug — either in CUDA event
-// ordering, L2 flush logic, or FLOPs accounting.
+// nvbench shim: FP16 GEMM 8192^3 via cuBLAS — cross-validates bench/_harness.py.
+// Divergence > 3% from this binary signals a bug in CUDA event ordering,
+// L2 flush logic, or FLOPs accounting.
 //
-// We deliberately do NOT use nvbench's built-in clock-lock feature
-// (`set_blocking_kernel_timeout` etc.) because the bake-off already holds
-// the lock via the dgx-bench-clocklock container. Double-locking would
-// conflict and is harmless but unnecessary.
+// nvbench's built-in clock-lock feature is intentionally NOT used:
+// the bake-off already holds the lock via dgx-bench-clocklock.
 
 #include <cstdio>
 #include <cstdlib>
@@ -43,8 +40,7 @@ static void fp16_gemm(nvbench::state &state) {
   const int N = static_cast<int>(state.get_int64("N"));
   const int K = static_cast<int>(state.get_int64("K"));
 
-  // Allocate row-major fp16 A (M,K), B (K,N), C (M,N).
-  // cuBLAS is column-major-native, but cublasLt with order=ROW handles it.
+  // Row-major fp16 A (M,K), B (K,N), C (M,N). cublasLt handles row order.
   __half *dA = nullptr, *dB = nullptr, *dC = nullptr;
   CK(cudaMalloc(&dA, sizeof(__half) * M * K));
   CK(cudaMalloc(&dB, sizeof(__half) * K * N));
@@ -55,7 +51,7 @@ static void fp16_gemm(nvbench::state &state) {
   cublasLtHandle_t lt = nullptr;
   CKB(cublasLtCreate(&lt));
 
-  // Operation: C = alpha * A @ B + beta * C with fp16 in/out, fp32 accumulate.
+  // C = alpha·A @ B + beta·C, fp16 in/out, fp32 accumulate
   cublasLtMatmulDesc_t opDesc = nullptr;
   CKB(cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
@@ -85,7 +81,7 @@ static void fp16_gemm(nvbench::state &state) {
 
   const float alpha = 1.0f, beta = 0.0f;
 
-  // FLOPs accounting for nvbench (so it can report TFLOP/s).
+  // FLOPs accounting so nvbench can report TFLOP/s
   state.add_element_count(static_cast<int64_t>(M) * N * K, "MNK");
   state.add_global_memory_reads<__half>(static_cast<int64_t>(M) * K +
                                         static_cast<int64_t>(K) * N);

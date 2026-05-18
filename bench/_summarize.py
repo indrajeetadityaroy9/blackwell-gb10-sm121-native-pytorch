@@ -1,9 +1,9 @@
 """
-Aggregator: combine bench/logs/run{A,B,C}.json into SUMMARY.txt with SOL Scores.
+Aggregate bench/logs/run{A,B,C}.json into SUMMARY.txt with SOL Scores.
 
-Run A's measured TFLOPs serves as the baseline; SOL Score per (wheel, test) =
-(measured - baselineA) / (sol - baselineA). For tests where Run A skipped, the
-score is reported as N/A.
+Run A is the baseline:
+  SOL Score(wheel, test) = (measured − baselineA) / (sol − baselineA)
+N/A when Run A skipped.
 
 Usage: python bench/_summarize.py [bench/logs/]
 """
@@ -59,7 +59,7 @@ def main() -> int:
     out: list[str] = []
     out.append("============= DGX Spark 3-way comparison =============")
     if any(runs.values()):
-        # Use first available doc's env info for top metadata
+        # Top metadata from the first available doc
         meta = next(d for d in runs.values() if d is not None)
         out.append(f"Date (run A ts): {meta.get('ts')}")
         out.append(f"Device: {meta.get('device_name')}  arch_list={meta.get('arch_list')}")
@@ -89,7 +89,7 @@ def main() -> int:
             )
         out.append("")
 
-    # SOL Score comparison table (Run A = baseline)
+    # SOL Score table — Run A is baseline
     out.append("--- SOL Score vs Run A baseline ---")
     out.append(f"  {'test':<42s}   A(base)     B    score_B     C    score_C    SOL")
     for name in test_names:

@@ -4,3 +4,4 @@ bench/logs/
 bench/build/
 *.whl
 research/
+docs/

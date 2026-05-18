@@ -12,7 +12,7 @@
 #     -v dgx-spark-build-strict:/work \
 #     -v $PWD:/repo:ro \
 #     nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04 \
-#     bash /repo/bench/e2e/build_flashinfer.sh'
+#     bash /repo/bench/experimental/build_flashinfer.sh'
 #
 # Time budget: ~30-60 min cold build, ~5-10 min incremental via ccache.
 

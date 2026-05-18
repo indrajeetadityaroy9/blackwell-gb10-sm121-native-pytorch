@@ -42,8 +42,8 @@ reports 2411 MHz (0.3% within target). PASS.
 
 | Volume | Purpose | Created by |
 |---|---|---|
-| `dgx-spark-build-strict` | PyTorch wheel (from `build/source_build.sh`), nvbench binary (from `bench/nvbench_shim/build_nvbench.sh`), FlashInfer wheel (from `bench/e2e/build_flashinfer.sh`) | `build/source_build.sh` initially |
-| `mlperf-cache` | MLPerf v5.1 weights + dataset (~16 GB; Tier 4 only) | `bench/e2e/mlperf_llama31_8b.py` |
+| `dgx-spark-build-strict` | PyTorch wheel (from `build/source_build.sh`), nvbench binary (from `bench/nvbench_shim/build_nvbench.sh`), FlashInfer wheel (from `bench/experimental/build_flashinfer.sh`) | `build/source_build.sh` initially |
+| `mlperf-cache` | MLPerf v5.1 weights + dataset (~16 GB; Tier 4 only) | `bench/experimental/mlperf_llama31_8b.py` |
 | `bench/cache/triton/sm121/runA,runB,runC` (bind mounts) | Triton autotune cache, per-container | `run_bakeoff.sh` |
 
 ### Why per-container Triton cache?
@@ -60,7 +60,7 @@ own `cache/triton/sm121/run<X>/` subdir.
 |---|---|---|
 | `torch-2.10.0-*.whl` (sm_121 native) | `build/source_build.sh` | `dgx-spark-build-strict:/work/pytorch/dist/` |
 | `sm121_gemm` (nvbench shim binary) | `bench/nvbench_shim/build_nvbench.sh` | `dgx-spark-build-strict:/work/nvbench_shim/build/` |
-| `flashinfer-*.whl` (sm_121 native) | `bench/e2e/build_flashinfer.sh` | `dgx-spark-build-strict:/work/flashinfer/dist/` |
+| `flashinfer-*.whl` (sm_121 native) | `bench/experimental/build_flashinfer.sh` | `dgx-spark-build-strict:/work/flashinfer/dist/` |
 
 All three are built inside containers, never on the host. Re-runs reuse the
 volume; only invalidate by deleting the volume (`docker volume rm dgx-spark-build-strict`).

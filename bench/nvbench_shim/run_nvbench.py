@@ -1,13 +1,12 @@
 """
-Tier 3: invoke the nvbench C++ shim, parse its JSON output, emit a Result row.
-Builds the binary on first run (via build_nvbench.sh inside docker), then runs
-it once per invocation. Cross-validates Tier 1's Python harness within ±3%.
+Tier 3: invoke the nvbench C++ shim, parse JSON, emit a Result row.
+Builds the binary on first run via build_nvbench.sh inside docker.
+Cross-validates Tier 1 within ±3%.
 
-The build container and run container are the same (cuda:13.2.0-devel) — we
-just produce the binary into the dgx-spark-build-strict volume and re-mount
-that volume read-only for execution.
+Build and run use the same cuda:13.2.0-devel image; the binary lives in
+the dgx-spark-build-strict volume, mounted read-only at run time.
 
-Standalone usage (from host):
+Usage (from host):
   sg docker -c 'python bench/nvbench_shim/run_nvbench.py'
 """
 
@@ -20,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Make _harness importable when this script is run from host or container.
+# Make _harness importable from both host and container.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _harness import Result, Stats  # noqa: E402
@@ -45,9 +44,9 @@ def _docker(args: list[str], extra_flags: list[str] | None = None,
 
 
 def build_if_missing() -> str:
-    """Build nvbench shim if not present in the volume. Returns binary path."""
+    """Build nvbench shim if absent from the volume. Returns binary path."""
     bin_path = "/work/nvbench_shim/build/sm121_gemm"
-    # Probe if the binary exists in the volume
+    # Probe the volume for the binary
     probe = subprocess.run(
         ["docker", "run", "--rm", "-v", f"{VOLUME}:/work",
          "alpine", "sh", "-c", f"test -x {bin_path} && echo OK || echo MISSING"],
@@ -65,14 +64,14 @@ def build_if_missing() -> str:
     sys.stderr.write(res.stderr.decode(errors="replace"))
     if res.returncode != 0:
         raise RuntimeError(
-            f"nvbench shim build failed (exit {res.returncode}) — "
-            "sm_121 may not be supported by upstream nvbench. See stderr above."
+            f"nvbench shim build failed (exit {res.returncode}); "
+            "upstream nvbench may not support sm_121. See stderr above."
         )
     return bin_path
 
 
 def run_benchmark(bin_path: str) -> dict:
-    """Run nvbench binary with --json -, return parsed JSON document."""
+    """Invoke nvbench binary with --json -; return parsed JSON."""
     res = _docker(
         ["bash", "-c", f"{bin_path} --json -"],
         capture=True,
@@ -82,9 +81,9 @@ def run_benchmark(bin_path: str) -> dict:
             f"nvbench binary exited {res.returncode}: "
             f"{res.stderr.decode(errors='replace')[-240:]}"
         )
-    # nvbench emits its JSON on stdout; some logging may be interleaved on stderr.
+    # nvbench JSON is on stdout; logs go to stderr.
     raw = res.stdout.decode(errors="replace")
-    # nvbench output starts with `{` after some optional warmup chatter
+    # Skip any leading chatter; nvbench JSON starts at the first '{'
     idx = raw.find("{")
     if idx < 0:
         raise ValueError("no JSON found in nvbench output")
@@ -97,7 +96,7 @@ def to_results(nvbench_doc: dict) -> list[Result]:
     for b in nvbench_doc.get("benchmarks", []):
         name = f"nvbench_{b['name']}"
         for st in b.get("states", []):
-            # nvbench reports summaries; pick the GPU time summary.
+            # Pick the GPU time summary from nvbench's summaries.
             gpu_summary = next(
                 (s for s in st.get("summaries", [])
                  if s.get("tag") == "nv/cold/time/gpu/mean"),
@@ -107,7 +106,7 @@ def to_results(nvbench_doc: dict) -> list[Result]:
                 continue
             mean_s = float(gpu_summary["data"]["value"]["value"])
             mean_ms = mean_s * 1000.0
-            # FLOPs come from element_count axis (we set M*N*K)
+            # FLOPs derived from element_count axis (we set it to M·N·K)
             elem = next(
                 (s for s in st.get("summaries", [])
                  if s.get("tag") == "nv/cold/bw/global/element_count"),
@@ -115,8 +114,7 @@ def to_results(nvbench_doc: dict) -> list[Result]:
             )
             elements = float(elem["data"]["value"]["value"]) if elem else None
             tflops = (2.0 * elements / mean_s / 1e12) if elements else 0.0
-            # Build a Result. We don't have multiple iters here (nvbench reports
-            # only mean), so stats are degenerate.
+            # nvbench reports only mean; stats are degenerate.
             stats = Stats(
                 mean_ms=mean_ms, median_ms=mean_ms,
                 p10_ms=mean_ms, p90_ms=mean_ms,

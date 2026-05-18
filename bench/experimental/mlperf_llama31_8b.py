@@ -10,8 +10,8 @@ Runner), the canonical MLPerf v5.1 entrypoint, inside the MLCommons reference
 container ghcr.io/mlcommons/inference:5.1-dev.
 
 Standalone invocation:
-  bash bench/e2e/run_e2e.sh                              # Tier 4 default
-  python bench/e2e/mlperf_llama31_8b.py --scenario Offline --duration 60
+  bash bench/experimental/run_e2e.sh                              # Tier 4 default
+  python bench/experimental/mlperf_llama31_8b.py --scenario Offline --duration 60
 
 Requires (host env):
   - BENCH_DOWNLOAD_MODELS=1  (gate: implies user has accepted the 16 GB download)

@@ -1,18 +1,15 @@
 """
-Tier 2 — Triton autotuned matmul (TritonForge methodology).
+Tier 2 — Triton autotuned matmul (TritonForge methodology, arXiv 2512.09196).
 
-TritonForge paper (arXiv 2512.09196) reports 1.76× avg speedup, ≥1.5× on majority
-of shapes, from profiling-guided autotune over the config grid below. We don't
-use profiling feedback — this is plain Triton autotune across the same search
-space. Cache key=[M,N,K] so successive iterations reuse the best config.
+Plain triton.autotune over the same 162-config search grid as TritonForge
+(no profiling feedback). Cache key=[M,N,K] so iters reuse the best config.
 
-Adds `triton_autotuned` as a SECOND test alongside the existing fixed-tile
-`triton` test in bench_full.py. The two measure different things:
-  - `triton`            : codegen quality with one config (fair A/B/C compiler test)
-  - `triton_autotuned`  : best Triton performance on this hardware
+Runs as a SECOND test alongside the fixed-tile `triton` test:
+  - `triton`           : compiler codegen quality (one fixed config)
+  - `triton_autotuned` : best Triton performance on this hardware
 
-First-run autotune cost: ~5-10 min (162 configs × kernel compile). Cache mounted
-per-container via bench/cache/triton/sm121/run{A,B,C}/ in run_bakeoff.sh.
+First-run autotune cost: ~5-10 min (162 compiles). Cache mounted per-container
+at bench/cache/triton/sm121/run{A,B,C}/ via run_bakeoff.sh.
 """
 
 from __future__ import annotations
@@ -46,16 +43,10 @@ def _skip(name: str, reason: str) -> Result:
 
 
 def test_triton_autotuned() -> Result:
-    """
-    TritonForge-style autotune sweep:
-      BLOCK_M ∈ {64, 128, 256}
-      BLOCK_N ∈ {64, 128, 256}
-      BLOCK_K ∈ {32, 64, 128}
-      num_stages ∈ {2, 3, 4}
-      num_warps ∈ {4, 8}
-    GROUP_M fixed at 8 (TritonForge keeps this constant in the matmul recipe).
-    Total: 162 configs.
-    """
+    """TritonForge-style sweep over 162 configs:
+      BLOCK_M ∈ {64,128,256}, BLOCK_N ∈ {64,128,256}, BLOCK_K ∈ {32,64,128},
+      num_stages ∈ {2,3,4}, num_warps ∈ {4,8}.
+    GROUP_M=8 fixed (TritonForge recipe)."""
     name = "triton_autotuned_matmul_8192_fp16"
     try:
         import triton
@@ -120,9 +111,7 @@ def test_triton_autotuned() -> Result:
         return _skip(name, f"setup: {e}")
 
     def run() -> None:
-        # When autotune is in play, the grid lambda receives the chosen config
-        # via META — but our launch already passes META values explicitly through
-        # the autotune decorator, so the launch arg names just need to omit those.
+        # Under autotune, the grid lambda receives the chosen config via META.
         grid = lambda META: (
             triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
         )
@@ -133,21 +122,21 @@ def test_triton_autotuned() -> Result:
             c.stride(0), c.stride(1),
         )
 
-    # First call triggers autotune (slow). Pre-run once outside the timing window.
+    # First call triggers autotune (slow); pre-run outside the timing window.
     try:
         run()
         torch.cuda.synchronize()
     except Exception as e:
         return _skip(name, f"autotune: {type(e).__name__}: {str(e)[:240]}")
 
-    # Correctness gate vs torch fp16 matmul
+    # Correctness gate vs torch fp16 matmul reference
     try:
         ref = a @ b
         correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2)
     except Exception as e:
         correctness = f"FAIL: {type(e).__name__}: {e}"
 
-    # Now time it — cache hit, picks best config every call
+    # Time it — cache hits the autotuned best config
     try:
         stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
     except Exception as e:
@@ -159,7 +148,7 @@ def test_triton_autotuned() -> Result:
     tflops = flops_per_call / median_s / 1e12
     sol = gemm_sol(M, N, K, "fp16", cfg)
 
-    # Pull the chosen config for the extra payload (helpful for SUMMARY)
+    # Record chosen config in extra payload (shown in SUMMARY)
     chosen = None
     try:
         cached = matmul_kernel.cache.get((M, N, K))

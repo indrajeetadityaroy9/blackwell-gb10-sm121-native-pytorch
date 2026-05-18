@@ -8,13 +8,13 @@ github.com/flashinfer-ai/flashinfer-bench. See plan Risk Register entry #9.
 Requires:
   - FlashInfer source-built with TORCH_CUDA_ARCH_LIST=12.1 (PyPI wheels are
     sm_120-only; trtllm-gen FMHA cubins lack sm_121 → cudaErrorIllegalInstruction).
-    Build via: bash bench/e2e/build_flashinfer.sh
+    Build via: bash bench/experimental/build_flashinfer.sh
   - flashinfer-bench==0.1.2 installed: pip install flashinfer-bench==0.1.2
-  - A trace file at bench/e2e/traces/<model>.jsonl (placeholder included; real
+  - A trace file at bench/experimental/traces/<model>.jsonl (placeholder included; real
     traces should be captured from an actual workload via FlashInfer's tracer).
 
 Standalone invocation:
-  python bench/e2e/serve_flashinfer.py [--trace llama31_8b] [--json]
+  python bench/experimental/serve_flashinfer.py [--trace llama31_8b] [--json]
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ TRACE_DIR = Path(__file__).resolve().parent / "traces"
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", default="llama31_8b",
-                    help="trace file basename under bench/e2e/traces/ (no .jsonl)")
+                    help="trace file basename under bench/experimental/traces/ (no .jsonl)")
     ap.add_argument("--backend", default="flashinfer",
                     choices=["flashinfer", "torch_sdpa", "cudnn"],
                     help="attention backend to benchmark")

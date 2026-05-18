@@ -1,12 +1,10 @@
-# Speed-of-Light (SOL) configuration for NVIDIA DGX Spark / GB10 (sm_121).
-# Used by bench/_solar.py to compute analytical SOL bounds for each kernel.
+# SOL configuration for NVIDIA DGX Spark / GB10 (sm_121).
+# Used by bench/_solar.py.
 #
-# Values marked VERIFIED came from torch.cuda.get_device_properties(0) and
-# nvidia-smi on this hardware. Values marked PLACEHOLDER are SOL targets and
-# must be calibrated for absolute SOL Score accuracy — until calibrated,
-# SOL Scores are only meaningful for *relative* comparison across runs A/B/C.
-#
-# To calibrate: bash bench/calibrate_peaks.sh (one-shot, optional)
+# VERIFIED values come from cudaDeviceProp / nvidia-smi.
+# PLACEHOLDER peak_tflops are SOL targets — calibrate via
+# bash bench/calibrate_peaks.sh for absolute scores. Until then, SOL Scores
+# are only meaningful for relative comparison across runs A/B/C.
 
 [gb10]
 sm = "sm_121"
@@ -14,17 +12,13 @@ sm_count = 48                   # VERIFIED via cudaDeviceProp.multi_processor_co
 l2_cache_mb = 24                # VERIFIED via cudaDeviceProp.L2_cache_size
 unified_mem_gb = 124.6          # VERIFIED via cudaDeviceProp.total_memory
 
-# GB10 uses Grace LPDDR5X-8533 unified memory (not GDDR/HBM).
-# Theoretical: LPDDR5X-8533 @ 4 channels ≈ 273 GB/s peak.
-# Verify with the Tier 2 `bandwidth` test (cudaMemcpyAsync + triad) before
-# trusting bandwidth-bound SOL ratios.
+# Grace LPDDR5X-8533 × 4 channels ≈ 273 GB/s peak.
+# Verify with the Tier 2 `bandwidth` test before trusting bandwidth SOL.
 mem_bandwidth_tb_s = 0.273
 
 [gb10.peak_tflops]
-# PLACEHOLDER values — derived as ~1.1× the highest TFLOPs measured across
-# runs A/B/C on this hardware (FP16=82, FP8=170, FP4=314 from bench/logs/SUMMARY.txt).
-# Replace with NVIDIA GB10 datasheet specs when published, or run
-# bench/calibrate_peaks.sh to auto-fit.
+# PLACEHOLDER ~1.1× highest measured TFLOPs across runs A/B/C.
+# Replace with GB10 datasheet or bench/calibrate_peaks.sh output.
 fp16       = 90.0
 bf16       = 90.0
 fp8        = 185.0

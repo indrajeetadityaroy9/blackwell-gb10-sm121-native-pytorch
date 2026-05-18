@@ -1,21 +1,16 @@
 """
-Tier 3: Nsight Compute roofline analysis via the ncu_report Python API.
+Tier 3: Nsight Compute roofline via ncu_report Python API.
 
-Runs `ncu --set roofline` against bench/bench_full.py for one chosen test,
-parses the .ncu-rep file via ncu_report (PyPI ==2025.3.1), and emits:
-  - achieved_tflops
-  - achieved_gbs
-  - arithmetic_intensity
-  - sol_pct_compute, sol_pct_memory (Nsight's built-in SOL fractions)
+Runs `ncu --set roofline` against bench_full.py for one test, parses the
+.ncu-rep, emits achieved_tflops, achieved_gbs, arith_intensity, and the
+sol_sm / sol_mem percentages from Nsight's roofline rule.
 
-Opt-in via BENCH_PROFILE=1 — slow (each profile run takes 10-30× the normal
-runtime due to instrumentation). Not included in default bake-off.
+Opt-in via BENCH_PROFILE=1 (profiling is 10-30× slower than normal runs).
 
-Container prep (must be done by run_bakeoff.sh when BENCH_PROFILE=1):
+Container prep (when BENCH_PROFILE=1):
   apt-get install -y nsight-compute-2025.3.1
   pip install ncu_report==2025.3.1
-  Run with --cap-add=SYS_ADMIN  (NVIDIA HW counters need it; otherwise
-  ncu returns ERR_NVGPUCTRPERM)
+  Run with --cap-add=SYS_ADMIN (NVIDIA HW counters; else ERR_NVGPUCTRPERM)
 
 Usage:
   python bench/roofline.py fp16
@@ -36,17 +31,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-# Metrics collected by ncu's roofline rule. Verified on Blackwell sm_121 with
-# Nsight Compute 2026.1.0:
-#   - sol_sm and sol_mem are present (the headline SOL percentages)
-#   - per-instruction SASS counters (fp16_inst_per_s, dram_bytes, etc.) are
-#     NOT in the roofline rule's metric set on Blackwell; would need
-#     `--set full` (much slower) or specific metric IDs. Reported as None.
+# Metrics from ncu's roofline rule. Verified on Blackwell sm_121 (Nsight 2026.1.0):
+#   - sol_sm / sol_mem: present (the headline SOL percentages)
+#   - per-instruction SASS counters: NOT in the roofline set on Blackwell;
+#     would need `--set full` (slower) or specific metric IDs. Reported as None.
 METRICS = {
-    # SOL percentages — Nsight's "fraction of theoretical peak achieved"
+    # SOL percentages — fraction of theoretical peak achieved
     "sol_sm": "sm__throughput.avg.pct_of_peak_sustained_elapsed",
     "sol_mem": "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed",
-    # Optional per-instruction metrics — may be None on Blackwell roofline set
+    # Per-instruction metrics — likely None on Blackwell roofline set
     "fp16_inst_per_s": "sm__sass_thread_inst_executed_op_fp16_pred_on.sum.per_second",
     "tensor_inst_per_s": "sm__inst_executed_pipe_tensor_op.sum.per_second",
     "dram_bw_per_s": "dram__bytes.sum.per_second",
@@ -67,7 +60,7 @@ def have_ncu_report() -> bool:
 
 
 def profile_one(test_key: str, rep_dir: Path) -> Path:
-    """Run ncu against bench_full.py --only test_key, write .ncu-rep."""
+    """Run ncu on bench_full.py --only test_key, return .ncu-rep path."""
     rep_dir.mkdir(parents=True, exist_ok=True)
     rep_base = rep_dir / f"{test_key}"
     bench_full = Path(__file__).resolve().parent / "bench_full.py"
@@ -83,12 +76,12 @@ def profile_one(test_key: str, rep_dir: Path) -> Path:
     print(f"[roofline] profiling: {' '.join(cmd)}", file=sys.stderr)
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        # ncu often writes errors to stderr; show them
+        # ncu writes errors to stderr; surface them
         sys.stderr.write(res.stdout)
         sys.stderr.write(res.stderr)
         raise RuntimeError(
-            f"ncu exited {res.returncode} — common cause: missing "
-            f"--cap-add=SYS_ADMIN on container (ERR_NVGPUCTRPERM)."
+            f"ncu exited {res.returncode} — usually missing --cap-add=SYS_ADMIN "
+            f"on container (ERR_NVGPUCTRPERM)."
         )
     rep_path = Path(str(rep_base) + ".ncu-rep")
     if not rep_path.exists():
@@ -97,11 +90,10 @@ def profile_one(test_key: str, rep_dir: Path) -> Path:
 
 
 def parse_report(rep_path: Path) -> dict:
-    """Extract roofline metrics from a .ncu-rep file via ncu_report API."""
+    """Extract roofline metrics from a .ncu-rep via ncu_report."""
     import ncu_report
     ctx = ncu_report.load_report(str(rep_path))
-    # A roofline run typically has many kernel launches; aggregate the heaviest
-    # kernel (usually the GEMM/attn kernel under test, not the L2 flush warmups).
+    # Pick the heaviest kernel (the GEMM/attn under test, not L2 flushes).
     heaviest = None
     heaviest_dur = -1.0
     for ri in range(ctx.num_ranges()):

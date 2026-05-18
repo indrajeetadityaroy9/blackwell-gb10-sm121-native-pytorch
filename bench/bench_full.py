@@ -1,36 +1,35 @@
 """
-DGX Spark bake-off benchmark — six tests exercising Blackwell-class capabilities,
-measured under SOL-ExecBench methodology (arXiv 2603.19173):
+DGX Spark bake-off benchmark — six Blackwell-class tests under SOL-ExecBench
+methodology (arXiv 2603.19173).
 
-  1. FP16 GEMM 8192^3                    (cuBLAS dispatch via a @ b)
-  2. FP8 GEMM 8192^3 (e4m3)              (torch._scaled_mm, use_fast_accum=True)
-  3. FP4 GEMM 8192^3 (e2m1, NVFP4)       (torch._scaled_mm, 1x16 / e4m3fn scales)
-  4. cuSPARSELt 2:4 sparse mm 8192^3     (to_sparse_semi_structured + F.linear)
-  5. Triton matmul 8192^3 (FP16)         (hand-written @triton.jit kernel, fixed tile)
-  6. flash-attention forward             (flash_attn_func or torch SDPA-flash)
+Tests:
+  1. FP16 GEMM 8192^3                  (a @ b → cuBLAS)
+  2. FP8 GEMM 8192^3 (e4m3)            (torch._scaled_mm, use_fast_accum=True)
+  3. FP4 GEMM 8192^3 (NVFP4)           (torch._scaled_mm, 1x16 / e4m3fn scales)
+  4. cuSPARSELt 2:4 sparse mm 8192^3   (to_sparse_semi_structured + F.linear)
+  5. Triton matmul 8192^3 (FP16)       (fixed-tile @triton.jit)
+  6. flash-attention forward           (flash_attn_func or torch SDPA-flash)
 
-Methodology (per SOL-ExecBench):
-  - CUDA event timing (kernel-only, no Python overhead) via bench._harness
-  - L2 cache flushed before every iteration (cold-cache; GB10 L2 = 24 MB → 48 MB buffer)
-  - 5 warmup iters + 50 timed iters (default; override BENCH_ITERS=N)
-  - Per-test correctness gate at small M=1024 against fp32 reference
-  - SOL Score against analytical Speed-of-Light bound from bench/sol_config.toml
+Methodology:
+  - CUDA event timing via bench._harness (kernel-only)
+  - L2 flush per iter (48 MB buffer for GB10's 24 MB L2)
+  - 5 warmup + 50 timed iters (overridable via BENCH_ITERS / BENCH_WARMUP)
+  - Per-test correctness gate at M=1024 vs fp32 reference
+  - SOL Score from bench/sol_config.toml
 
-Each test reports SKIPPED if a feature is missing from the current torch/triton/
-flash_attn build, so the same script runs against PyPI baseline (Run A), the
-from-source wheel (Run B), and NGC (Run C).
+Missing features SKIP gracefully so the same script runs across runs A/B/C.
 
 CLI:
-  python bench_full.py                       # all tests, human-readable
-  python bench_full.py --only fp16,fp8       # subset of tests
-  python bench_full.py --only fp16 --json    # single test, JSON to stdout (for run_isolated)
-  python bench_full.py --json                # all tests, JSON document to stdout
+  bench_full.py                       # all tests, human-readable
+  bench_full.py --only fp16,fp8       # subset
+  bench_full.py --only fp16 --json    # single test → JSON to stdout
+  bench_full.py --json                # all tests → JSON to stdout
 
-Env overrides (CLI takes precedence over env):
-  BENCH_M=8192        size for the GEMM tests (M = N = K)
-  BENCH_ITERS=50      timed iterations per test (default 50 = SOL-ExecBench)
-  BENCH_WARMUP=5      warmup iterations (default 5)
-  BENCH_ONLY=fp4      comma-separated subset of test keys; equivalent to --only
+Env (CLI takes precedence):
+  BENCH_M=8192       GEMM dim (M = N = K)
+  BENCH_ITERS=50     timed iters per test
+  BENCH_WARMUP=5     warmup iters
+  BENCH_ONLY=fp4     same as --only
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-# Make `bench/` importable when invoked as `python bench/bench_full.py` or via subprocess.
+# Make bench/ importable from both `python bench/bench_full.py` and subprocess.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
@@ -85,7 +84,7 @@ def _skip_result(name: str, reason: str, unit: str = "TFLOPs") -> Result:
 def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
                  dtype: str, correctness: str | None = None,
                  out_bpe: float = 2.0) -> Result:
-    """Time a GEMM, compute SOL, package as Result. flops = 2·M·N·K."""
+    """Time a GEMM and package as Result. flops = 2·M·N·K."""
     try:
         stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
     except Exception as e:
@@ -96,7 +95,7 @@ def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
     sol = gemm_sol(M_, N_, K_, dtype, CFG, out_bytes_per_elem=out_bpe)
     return Result(
         name=name, unit="TFLOPs", measured=tflops,
-        sol=sol.sol_tflops, sol_score=None,   # baseline filled by orchestrator
+        sol=sol.sol_tflops, sol_score=None,   # filled by orchestrator
         sol_limit=sol.limit, stats=stats,
         correctness=correctness, note=None,
         extra={"flops": flops_per_call, "compute_bound_s": sol.compute_bound_s,
@@ -106,7 +105,7 @@ def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
 
 def _attn_result(name: str, fn: Callable, *, B: int, H: int, S: int, D: int,
                  dtype: str = "fp16", causal: bool = True) -> Result:
-    """Time an attention kernel, compute SOL via attn_sol."""
+    """Time an attention kernel; SOL via attn_sol."""
     try:
         stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
     except Exception as e:
@@ -169,7 +168,7 @@ def test_fp8() -> Result:
     try:
         a = torch.randn(M, K, device=DEVICE).to(torch.float8_e4m3fn)
         b = torch.randn(K, N, device=DEVICE).to(torch.float8_e4m3fn)
-        b = b.t().contiguous().t()  # FP8 GEMM wants col-major right operand
+        b = b.t().contiguous().t()  # FP8 GEMM needs col-major right operand
         scale_a = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
         scale_b = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
     except Exception as e:
@@ -198,8 +197,8 @@ def test_fp4() -> Result:
         scale_b = torch.ones(N, K // 16, device=DEVICE, dtype=e4m3)
     except Exception as e:
         return _skip_result(name, f"setup: {e}")
-    # FP4 correctness gate skipped: random uint8 input + 16 representable values
-    # → error magnitude O(sqrt(K)·0.5) ≈ 45 at K=8192; meaningful tolerance unusable.
+    # FP4 correctness gate skipped: 16 representable values × random uint8 input
+    # gives error magnitude O(√K·0.5) ≈ 45 at K=8192 — no usable tolerance.
     fn = lambda: torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b,
                                    out_dtype=torch.bfloat16)
     return _gemm_result(name, fn, M_=M, N_=N, K_=K, dtype="fp4",
@@ -226,7 +225,7 @@ def test_sparse_24() -> Result:
         x = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
     except Exception as e:
         return _skip_result(name, f"setup: {e}")
-    # Correctness gate: dense linear with same masked weight should match
+    # Correctness gate: dense linear with the same masked weight must match
     try:
         out = torch.nn.functional.linear(x, w_sparse)
         ref = torch.nn.functional.linear(x, w)
@@ -234,7 +233,7 @@ def test_sparse_24() -> Result:
     except Exception as e:
         correctness = f"FAIL: {type(e).__name__}: {e}"
     fn = lambda: torch.nn.functional.linear(x, w_sparse)
-    # Sparse 2:4 effective ceiling = fp8 peak (per cuSPARSELt headline 2× dense)
+    # Sparse 2:4 effective ceiling = fp8 peak (2× dense per cuSPARSELt headline)
     return _gemm_result(name, fn, M_=M, N_=N, K_=K, dtype="sparse_fp8",
                         correctness=correctness)
 
@@ -299,7 +298,7 @@ def test_triton_matmul() -> Result:
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, GROUP_M=GROUP_M,
         )
 
-    # Correctness: triton output vs torch fp16 matmul
+    # Correctness: triton output vs torch fp16 matmul reference
     try:
         run()
         torch.cuda.synchronize()
@@ -314,7 +313,7 @@ def test_triton_matmul() -> Result:
 
 def test_flash_attn() -> Result:
     B, H, T, D = 4, 32, 4096, 128
-    # Prefer flash_attn (Dao-AI). Falls back to torch SDPA-flash if not installed.
+    # Prefer flash_attn (Dao-AI); fall back to torch SDPA-flash.
     try:
         from flash_attn import flash_attn_func  # type: ignore
         name = f"flash_attn_fwd_B{B}H{H}T{T}D{D}_causal"
@@ -343,7 +342,7 @@ def test_flash_attn() -> Result:
     return _attn_result(name, run, B=B, H=H, S=T, D=D, dtype="fp16", causal=True)
 
 
-# ---------- env_info (preserved for human output) ----------
+# ---------- env_info (human output) ----------
 
 def env_info() -> dict:
     info = {
@@ -387,14 +386,14 @@ ALL_TESTS: dict[str, Callable[[], Result]] = {
     "attn": test_flash_attn,
 }
 
-# Tier 2 kernel tests (bandwidth/attn_bwd/rmsnorm/softmax/cross_entropy)
+# Tier 2: bandwidth, attn_bwd, rmsnorm, softmax, cross_entropy
 try:
     from tests_kernels import TESTS as _TIER2_TESTS  # noqa: E402
     ALL_TESTS.update(_TIER2_TESTS)
 except ImportError:
     pass
 
-# Tier 2 Triton autotune
+# Tier 2: Triton autotune sweep
 try:
     from tests_triton_autotune import TESTS as _TIER2_TRITON_TESTS  # noqa: E402
     ALL_TESTS.update(_TIER2_TRITON_TESTS)
@@ -409,21 +408,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--json", action="store_true",
                     help="emit JSON document to stdout instead of human-readable")
     ap.add_argument("--no-isolate", action="store_true",
-                    help="run all selected tests in-process (default: when --only is "
-                         "unset, each test runs in its own subprocess for memory isolation "
-                         "per SOL-ExecBench)")
+                    help="run all selected tests in-process (default: subprocess "
+                         "per test for SOL-ExecBench memory isolation)")
     return ap.parse_args(argv)
 
 
 def _run_tests_isolated(test_keys: list[str], env: dict[str, str]) -> list[Result]:
-    """Per-SOL-ExecBench: spawn each test in its own Python subprocess.
-    Returns list of Result objects parsed from child --json output."""
+    """Spawn each test in its own Python subprocess (SOL-ExecBench isolation).
+    Returns Results parsed from child --json output."""
     out: list[Result] = []
     for key in test_keys:
         try:
-            # stderr must be separated from stdout — torch/numpy warnings on stderr
-            # would corrupt JSON parsing if merged. Captured stderr is preserved for
-            # failure diagnostics.
+            # Keep stderr separate: torch/numpy warnings would corrupt JSON if merged.
+            # stderr captured for failure diagnostics.
             proc = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()),
                  "--only", key, "--json", "--no-isolate"],
@@ -477,9 +474,8 @@ def main(argv: list[str] | None = None) -> int:
         print_env_info(info)
         print(f"\n Benchmarks (iters={ITERS}, warmup={WARMUP}, cold-cache L2 flush) ")
 
-    # Isolation: when multiple tests are selected AND --no-isolate isn't set,
-    # spawn each test in its own Python subprocess (SOL-ExecBench requirement).
-    # Single-test invocations (--only X) run in-process automatically.
+    # Multi-test runs spawn a subprocess per test (SOL-ExecBench isolation),
+    # unless --no-isolate. Single-test runs always go in-process.
     use_isolation = (len(selected) > 1) and (not args.no_isolate)
 
     results: list[Result] = []

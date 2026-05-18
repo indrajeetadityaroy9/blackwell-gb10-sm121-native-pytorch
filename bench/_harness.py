@@ -1,18 +1,15 @@
 """
 SOL-ExecBench harness primitives for DGX Spark GB10.
 
-Imported by bench_full.py, tests_kernels.py, tests_triton_autotune.py,
-roofline.py, and the Tier 4 e2e scripts. Single source of truth for:
-  - L2 cache flushing (cold-cache iterations per SOL-ExecBench)
-  - CUDA event timing (kernel-only, no Python overhead)
-  - Statistical aggregation (mean/median/p10/p90/stdev) via stdlib `statistics`
-  - SOL Score computation (re-exported from _solar.py)
+Provides:
+  - L2 cache flushing (cold-cache iterations)
+  - CUDA event timing (kernel-only)
+  - Stats aggregation (mean/median/p10/p90/stdev) via stdlib statistics
+  - SOL Score (re-exported from _solar)
   - JSON-serializable Result schema
   - Subprocess isolation for per-test memory cleanup
 
-Constraints:
-  - stdlib only (no numpy — not installed in Run A or Run B containers)
-  - L2 flush sized for GB10's 24 MB L2 (verified via cudaDeviceProp)
+Stdlib only — numpy is not installed in Run A or Run B containers.
 """
 
 from __future__ import annotations
@@ -44,7 +41,7 @@ _ENTRYPOINT = _BENCH_DIR / "bench_full.py"
 
 @dataclass
 class Stats:
-    """Latency statistics over N timed iterations (all in ms)."""
+    """Latency stats over N timed iterations (all in ms)."""
     mean_ms: float
     median_ms: float
     p10_ms: float
@@ -64,7 +61,7 @@ class Stats:
         # statistics.median is robust to single-sample input; quantiles needs n>=2
         median = statistics.median(samples_ms)
         if n >= 2:
-            # 10/90 percentiles via inclusive method (matches numpy default)
+            # p10/p90 via inclusive method (matches numpy default)
             quantiles = statistics.quantiles(samples_ms, n=10, method="inclusive")
             p10, p90 = quantiles[0], quantiles[-1]
             stdev = statistics.stdev(samples_ms)
@@ -82,18 +79,13 @@ class Stats:
 # ---------- L2 cache flusher ----------
 
 class L2Flusher:
-    """
-    SOL-ExecBench-style cold-cache reset between iterations.
-    GB10's L2 is 24 MB (verified via cudaDeviceProp); 2× L2 = 48 MB is
-    sufficient to evict any prior-iter footprint without wasting VRAM.
-    Allocates once, calls .flush() before each timed iteration.
-    """
+    """Cold-cache reset between iterations (SOL-ExecBench).
+    GB10 L2 = 24 MB; 2× L2 = 48 MB is enough to evict prior footprint."""
     DEFAULT_MB = 48
 
     def __init__(self, size_mb: int = DEFAULT_MB, device: str = "cuda"):
-        # int32 (4 bytes) → size_mb * 1024 * 1024 / 4 elements
-        n = size_mb * 1024 * 1024 // 4
-        # Catch OOM by halving once if needed (e.g. very large M leaves <48 MB free)
+        n = size_mb * 1024 * 1024 // 4   # int32 elements
+        # Halve on OOM (rare; only at very large M)
         try:
             self.buf = torch.zeros(n, dtype=torch.int32, device=device)
         except torch.cuda.OutOfMemoryError:
@@ -113,17 +105,13 @@ def cuda_event_time(
     iters: int = 50,
     flush: bool = True,
 ) -> Stats:
-    """
-    Kernel-only timing via CUDA events with optional cold-cache L2 flush.
-
-    The flush kernel is queued on the same stream before start.record(), so
-    the start event records AFTER the flush completes (stream-order semantics).
-    This makes each timed window measure ONLY fn(), with a known cold L2.
-    """
+    """Kernel-only timing via CUDA events with cold-cache L2 flush.
+    Flush is queued on the same stream before start.record(), so the
+    timed window measures only fn() with a cold L2."""
     if not torch.cuda.is_available():
         raise RuntimeError("cuda_event_time requires CUDA")
     flusher = L2Flusher() if flush else None
-    # warm up — discards initialization, autotune, lazy compilation costs
+    # Discard initialization, autotune, lazy compile costs
     for _ in range(warmup):
         _ = fn()
     torch.cuda.synchronize()
@@ -147,15 +135,15 @@ def cuda_event_time(
 
 @dataclass
 class Result:
-    """Single test result. JSON-serializable. Emitted to stdout under --json."""
-    name: str                      # test key, e.g. "fp16_gemm" / "rmsnorm"
+    """Single test result. JSON-serializable; emitted under --json."""
+    name: str                      # test key, e.g. "fp16_gemm"
     unit: str                      # "TFLOPs" or "GB/s"
     measured: float                # throughput in `unit`
-    sol: float | None              # SOL bound in same `unit`; None if not modeled
-    sol_score: float | None        # in [0, 1]; None if baseline+SOL unknown
+    sol: float | None              # SOL bound, same unit; None if unmodeled
+    sol_score: float | None        # in [0, 1]; None if baseline/SOL unknown
     sol_limit: str | None          # "compute" or "bandwidth"
     stats: Stats
-    correctness: str | None        # "PASS", "FAIL", or None if gate not applicable
+    correctness: str | None        # "PASS" / "FAIL" / None
     note: str | None = None        # human comment (e.g. SKIPPED reason)
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -165,7 +153,7 @@ class Result:
 
 
 def emit_json(results: list[Result], path: Path | None = None) -> None:
-    """Write JSON document. If path is None, prints to stdout."""
+    """Write JSON document. If path is None, write to stdout."""
     doc = {
         "schema_version": 1,
         "ts": time.time(),
@@ -185,13 +173,9 @@ def emit_json(results: list[Result], path: Path | None = None) -> None:
 # ---------- Subprocess isolation ----------
 
 def run_isolated(test_name: str, env_overrides: dict[str, str] | None = None) -> dict:
-    """
-    Per-SOL-ExecBench: each test in its own subprocess for memory isolation.
+    """Spawn one test in its own subprocess (SOL-ExecBench isolation).
     Returns the parsed JSON document the child wrote to stdout.
-
-    NOTE: __file__ inside _harness.py resolves to _harness.py — we must
-    explicitly invoke bench_full.py as the entrypoint.
-    """
+    Note: __file__ here is _harness.py; we invoke bench_full.py explicitly."""
     env = dict(os.environ)
     if env_overrides:
         env.update(env_overrides)
@@ -208,7 +192,7 @@ def allclose_gate(
     actual: torch.Tensor, reference: torch.Tensor,
     rtol: float = 1e-2, atol: float = 1e-2, name: str = "test",
 ) -> str:
-    """Return 'PASS' or 'FAIL: <detail>'. Never raises — failure is a status."""
+    """Return 'PASS' or 'FAIL: <detail>'. Never raises."""
     try:
         if torch.allclose(actual.float(), reference.float(), rtol=rtol, atol=atol):
             return "PASS"
