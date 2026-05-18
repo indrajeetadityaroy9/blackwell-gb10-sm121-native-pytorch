@@ -85,13 +85,8 @@ class L2Flusher:
 
     def __init__(self, size_mb: int = DEFAULT_MB, device: str = "cuda"):
         n = size_mb * 1024 * 1024 // 4   # int32 elements
-        # Halve on OOM (rare; only at very large M)
-        try:
-            self.buf = torch.zeros(n, dtype=torch.int32, device=device)
-        except torch.cuda.OutOfMemoryError:
-            n //= 2
-            self.buf = torch.zeros(n, dtype=torch.int32, device=device)
-        self.size_mb = (n * 4) // (1024 * 1024)
+        self.buf = torch.zeros(n, dtype=torch.int32, device=device)
+        self.size_mb = size_mb
 
     def flush(self) -> None:
         self.buf.zero_()
@@ -108,8 +103,6 @@ def cuda_event_time(
     """Kernel-only timing via CUDA events with cold-cache L2 flush.
     Flush is queued on the same stream before start.record(), so the
     timed window measures only fn() with a cold L2."""
-    if not torch.cuda.is_available():
-        raise RuntimeError("cuda_event_time requires CUDA")
     flusher = L2Flusher() if flush else None
     # Discard initialization, autotune, lazy compile costs
     for _ in range(warmup):
@@ -144,7 +137,6 @@ class Result:
     sol_limit: str | None          # "compute" or "bandwidth"
     stats: Stats
     correctness: str | None        # "PASS" / "FAIL" / None
-    note: str | None = None        # human comment (e.g. SKIPPED reason)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -159,8 +151,8 @@ def emit_json(results: list[Result], path: Path | None = None) -> None:
         "ts": time.time(),
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
-        "device_name": torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else None,
-        "arch_list": torch.cuda.get_arch_list() if torch.cuda.is_available() else None,
+        "device_name": torch.cuda.get_device_properties(0).name,
+        "arch_list": torch.cuda.get_arch_list(),
         "results": [r.to_dict() for r in results],
     }
     s = json.dumps(doc, indent=2, default=str)
@@ -192,14 +184,11 @@ def allclose_gate(
     actual: torch.Tensor, reference: torch.Tensor,
     rtol: float = 1e-2, atol: float = 1e-2, name: str = "test",
 ) -> str:
-    """Return 'PASS' or 'FAIL: <detail>'. Never raises."""
-    try:
-        if torch.allclose(actual.float(), reference.float(), rtol=rtol, atol=atol):
-            return "PASS"
-        max_diff = (actual.float() - reference.float()).abs().max().item()
-        return f"FAIL: max|diff|={max_diff:.4g} (rtol={rtol}, atol={atol})"
-    except Exception as e:
-        return f"FAIL: {type(e).__name__}: {e}"
+    """Return 'PASS' or 'FAIL: max|diff|=...'."""
+    if torch.allclose(actual.float(), reference.float(), rtol=rtol, atol=atol):
+        return "PASS"
+    max_diff = (actual.float() - reference.float()).abs().max().item()
+    return f"FAIL: max|diff|={max_diff:.4g} (rtol={rtol}, atol={atol})"
 
 
 # ---------- Self-test ----------
@@ -210,7 +199,6 @@ if __name__ == "__main__":
     print(f"  mean={s.mean_ms:.2f} median={s.median_ms:.2f} stdev_pct={s.stdev_pct:.2f}")
     print("  expected mean ~10.24, stdev_pct ~5%")
 
-    if torch.cuda.is_available():
-        print("\nsmoke test cuda_event_time(no-op):")
-        st = cuda_event_time(lambda: torch.cuda.synchronize(), warmup=2, iters=5)
-        print(f"  no-op median={st.median_ms:.4f} ms over {st.n} iters")
+    print("\nsmoke test cuda_event_time(no-op):")
+    st = cuda_event_time(lambda: torch.cuda.synchronize(), warmup=2, iters=5)
+    print(f"  no-op median={st.median_ms:.4f} ms over {st.n} iters")

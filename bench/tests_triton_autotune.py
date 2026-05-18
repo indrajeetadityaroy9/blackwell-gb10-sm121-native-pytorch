@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 
 from _harness import (
-    Result, Stats, allclose_gate, cuda_event_time, load_config,
+    Result, allclose_gate, cuda_event_time, load_config,
 )
 from _solar import gemm_sol
 
@@ -35,25 +35,14 @@ ITERS = int(os.environ.get("BENCH_ITERS", 50))
 M_DEFAULT = int(os.environ.get("BENCH_M", 8192))
 
 
-def _skip(name: str, reason: str) -> Result:
-    stats = Stats.from_samples([0.0])
-    return Result(name=name, unit="TFLOPs", measured=0.0, sol=None,
-                  sol_score=None, sol_limit=None, stats=stats,
-                  correctness=None, note=reason)
-
-
 def test_triton_autotuned() -> Result:
     """TritonForge-style sweep over 162 configs:
       BLOCK_M ∈ {64,128,256}, BLOCK_N ∈ {64,128,256}, BLOCK_K ∈ {32,64,128},
       num_stages ∈ {2,3,4}, num_warps ∈ {4,8}.
     GROUP_M=8 fixed (TritonForge recipe)."""
+    import triton
+    import triton.language as tl
     name = "triton_autotuned_matmul_8192_fp16"
-    try:
-        import triton
-        import triton.language as tl
-    except ImportError as e:
-        return _skip(name, f"triton: {e}")
-
     M = N = K = M_DEFAULT
 
     configs = [
@@ -103,12 +92,9 @@ def test_triton_autotuned() -> Result:
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         tl.store(c_ptrs, c, mask=c_mask)
 
-    try:
-        a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
-        b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
-        c = torch.empty(M, N, device=DEVICE, dtype=torch.float16)
-    except Exception as e:
-        return _skip(name, f"setup: {e}")
+    a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
+    b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
+    c = torch.empty(M, N, device=DEVICE, dtype=torch.float16)
 
     def run() -> None:
         # Under autotune, the grid lambda receives the chosen config via META.
@@ -123,24 +109,15 @@ def test_triton_autotuned() -> Result:
         )
 
     # First call triggers autotune (slow); pre-run outside the timing window.
-    try:
-        run()
-        torch.cuda.synchronize()
-    except Exception as e:
-        return _skip(name, f"autotune: {type(e).__name__}: {str(e)[:240]}")
+    run()
+    torch.cuda.synchronize()
 
     # Correctness gate vs torch fp16 matmul reference
-    try:
-        ref = a @ b
-        correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2)
-    except Exception as e:
-        correctness = f"FAIL: {type(e).__name__}: {e}"
+    ref = a @ b
+    correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2)
 
     # Time it — cache hits the autotuned best config
-    try:
-        stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
-    except Exception as e:
-        return _skip(name, f"{type(e).__name__}: {str(e)[:240]}")
+    stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
 
     cfg = load_config()
     flops_per_call = 2.0 * M * N * K
@@ -149,22 +126,17 @@ def test_triton_autotuned() -> Result:
     sol = gemm_sol(M, N, K, "fp16", cfg)
 
     # Record chosen config in extra payload (shown in SUMMARY)
-    chosen = None
-    try:
-        cached = matmul_kernel.cache.get((M, N, K))
-        if cached is not None:
-            chosen = {"BLOCK_M": cached.kwargs["BLOCK_M"],
-                      "BLOCK_N": cached.kwargs["BLOCK_N"],
-                      "BLOCK_K": cached.kwargs["BLOCK_K"],
-                      "num_stages": cached.num_stages,
-                      "num_warps": cached.num_warps}
-    except Exception:
-        pass
+    cached = matmul_kernel.cache[(M, N, K)]
+    chosen = {"BLOCK_M": cached.kwargs["BLOCK_M"],
+              "BLOCK_N": cached.kwargs["BLOCK_N"],
+              "BLOCK_K": cached.kwargs["BLOCK_K"],
+              "num_stages": cached.num_stages,
+              "num_warps": cached.num_warps}
 
     return Result(
         name=name, unit="TFLOPs", measured=tflops,
         sol=sol.sol_tflops, sol_score=None, sol_limit=sol.limit,
-        stats=stats, correctness=correctness, note=None,
+        stats=stats, correctness=correctness,
         extra={"flops": flops_per_call, "configs_searched": len(configs),
                "best_config": chosen},
     )

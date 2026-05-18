@@ -17,7 +17,7 @@ Methodology:
   - Per-test correctness gate at M=1024 vs fp32 reference
   - SOL Score from bench/sol_config.toml
 
-Missing features SKIP gracefully so the same script runs across runs A/B/C.
+All listed features are required; missing ones fail loudly at import or call time.
 
 CLI:
   bench_full.py                       # all tests, human-readable
@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import traceback
 from pathlib import Path
 from typing import Callable
 
@@ -65,8 +64,6 @@ CFG = None  # lazy-loaded in main()
 # ---------- helpers ----------
 
 def _human_row(r: Result, width: int = 44) -> str:
-    if r.note and r.measured == 0.0:
-        return f"  {r.name:{width}s} : SKIPPED ({r.note})"
     sol_str = f"SOL={r.sol:.1f}" if r.sol is not None else "SOL=?"
     score = f"score={r.sol_score:.2f}" if r.sol_score is not None else "score=?"
     return (f"  {r.name:{width}s} : {r.measured:7.2f} {r.unit:6s} "
@@ -74,21 +71,11 @@ def _human_row(r: Result, width: int = 44) -> str:
             f"med={r.stats.median_ms:.2f}ms, σ={r.stats.stdev_pct:.1f}%, n={r.stats.n})")
 
 
-def _skip_result(name: str, reason: str, unit: str = "TFLOPs") -> Result:
-    stats = Stats.from_samples([0.0])
-    return Result(name=name, unit=unit, measured=0.0,
-                  sol=None, sol_score=None, sol_limit=None,
-                  stats=stats, correctness=None, note=reason)
-
-
 def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
                  dtype: str, correctness: str | None = None,
                  out_bpe: float = 2.0) -> Result:
     """Time a GEMM and package as Result. flops = 2·M·N·K."""
-    try:
-        stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
-    except Exception as e:
-        return _skip_result(name, f"{type(e).__name__}: {str(e)[:240]}")
+    stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
     flops_per_call = 2.0 * M_ * N_ * K_
     median_s = stats.median_ms / 1000.0
     tflops = flops_per_call / median_s / 1e12
@@ -97,7 +84,7 @@ def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
         name=name, unit="TFLOPs", measured=tflops,
         sol=sol.sol_tflops, sol_score=None,   # filled by orchestrator
         sol_limit=sol.limit, stats=stats,
-        correctness=correctness, note=None,
+        correctness=correctness,
         extra={"flops": flops_per_call, "compute_bound_s": sol.compute_bound_s,
                "bandwidth_bound_s": sol.bandwidth_bound_s},
     )
@@ -106,10 +93,7 @@ def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
 def _attn_result(name: str, fn: Callable, *, B: int, H: int, S: int, D: int,
                  dtype: str = "fp16", causal: bool = True) -> Result:
     """Time an attention kernel; SOL via attn_sol."""
-    try:
-        stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
-    except Exception as e:
-        return _skip_result(name, f"{type(e).__name__}: {str(e)[:240]}")
+    stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
     flops_per_call = (2.0 if causal else 4.0) * B * H * S * S * D
     median_s = stats.median_ms / 1000.0
     tflops = flops_per_call / median_s / 1e12
@@ -118,7 +102,7 @@ def _attn_result(name: str, fn: Callable, *, B: int, H: int, S: int, D: int,
         name=name, unit="TFLOPs", measured=tflops,
         sol=sol.sol_tflops, sol_score=None,
         sol_limit=sol.limit, stats=stats,
-        correctness=None, note=None,
+        correctness=None,
         extra={"flops": flops_per_call, "B": B, "H": H, "S": S, "D": D, "causal": causal},
     )
 
@@ -134,8 +118,6 @@ def _correctness_fp16_gemm(M_=1024) -> str:
 
 
 def _correctness_fp8_gemm(M_=1024) -> str:
-    if not (hasattr(torch, "float8_e4m3fn") and hasattr(torch, "_scaled_mm")):
-        return "SKIP: no fp8 API"
     a32 = torch.randn(M_, M_, device=DEVICE)
     b32 = torch.randn(M_, M_, device=DEVICE)
     a = a32.to(torch.float8_e4m3fn)
@@ -160,19 +142,12 @@ def test_fp16() -> Result:
 
 def test_fp8() -> Result:
     name = "fp8_gemm_8192_e4m3"
-    if not hasattr(torch, "float8_e4m3fn"):
-        return _skip_result(name, "torch.float8_e4m3fn not in this build")
-    if not hasattr(torch, "_scaled_mm"):
-        return _skip_result(name, "torch._scaled_mm not in this build")
     correctness = _correctness_fp8_gemm()
-    try:
-        a = torch.randn(M, K, device=DEVICE).to(torch.float8_e4m3fn)
-        b = torch.randn(K, N, device=DEVICE).to(torch.float8_e4m3fn)
-        b = b.t().contiguous().t()  # FP8 GEMM needs col-major right operand
-        scale_a = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
-        scale_b = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
-    except Exception as e:
-        return _skip_result(name, f"setup: {e}")
+    a = torch.randn(M, K, device=DEVICE).to(torch.float8_e4m3fn)
+    b = torch.randn(K, N, device=DEVICE).to(torch.float8_e4m3fn)
+    b = b.t().contiguous().t()  # FP8 GEMM needs col-major right operand
+    scale_a = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
+    scale_b = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
     # use_fast_accum=True is the only path to Blackwell FP8 Tensor Core peak.
     fn = lambda: torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b,
                                    out_dtype=torch.bfloat16, use_fast_accum=True)
@@ -182,21 +157,14 @@ def test_fp8() -> Result:
 
 def test_fp4() -> Result:
     name = "fp4_gemm_8192_nvfp4"
-    fp4 = getattr(torch, "float4_e2m1fn_x2", None)
-    if fp4 is None:
-        return _skip_result(name, "torch.float4_e2m1fn_x2 not in this build")
-    e4m3 = getattr(torch, "float8_e4m3fn", None)
-    if e4m3 is None:
-        return _skip_result(name, "torch.float8_e4m3fn (nvfp4 scale) not available")
-    try:
-        a = torch.randint(0, 256, (M, K // 2), device=DEVICE,
-                          dtype=torch.uint8).view(fp4)
-        b = (torch.randint(0, 256, (N, K // 2), device=DEVICE,
-                           dtype=torch.uint8).view(fp4).t())
-        scale_a = torch.ones(M, K // 16, device=DEVICE, dtype=e4m3)
-        scale_b = torch.ones(N, K // 16, device=DEVICE, dtype=e4m3)
-    except Exception as e:
-        return _skip_result(name, f"setup: {e}")
+    fp4 = torch.float4_e2m1fn_x2
+    e4m3 = torch.float8_e4m3fn
+    a = torch.randint(0, 256, (M, K // 2), device=DEVICE,
+                      dtype=torch.uint8).view(fp4)
+    b = (torch.randint(0, 256, (N, K // 2), device=DEVICE,
+                       dtype=torch.uint8).view(fp4).t())
+    scale_a = torch.ones(M, K // 16, device=DEVICE, dtype=e4m3)
+    scale_b = torch.ones(N, K // 16, device=DEVICE, dtype=e4m3)
     # FP4 correctness gate skipped: 16 representable values × random uint8 input
     # gives error magnitude O(√K·0.5) ≈ 45 at K=8192 — no usable tolerance.
     fn = lambda: torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b,
@@ -207,31 +175,19 @@ def test_fp4() -> Result:
 
 def test_sparse_24() -> Result:
     name = "cusparselt_2of4_sparse_8192"
-    try:
-        from torch.sparse import SparseSemiStructuredTensor, to_sparse_semi_structured
-    except ImportError as e:
-        return _skip_result(name, f"torch.sparse: {e}")
-    try:
-        SparseSemiStructuredTensor._FORCE_CUTLASS = False
-    except AttributeError:
-        pass
-    try:
-        w = torch.randn(N, K, device=DEVICE, dtype=torch.float16)
-        mask = torch.zeros_like(w, dtype=torch.bool)
-        mask[:, 0::4] = True
-        mask[:, 1::4] = True
-        w = w * mask
-        w_sparse = to_sparse_semi_structured(w)
-        x = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
-    except Exception as e:
-        return _skip_result(name, f"setup: {e}")
+    from torch.sparse import SparseSemiStructuredTensor, to_sparse_semi_structured
+    SparseSemiStructuredTensor._FORCE_CUTLASS = False
+    w = torch.randn(N, K, device=DEVICE, dtype=torch.float16)
+    mask = torch.zeros_like(w, dtype=torch.bool)
+    mask[:, 0::4] = True
+    mask[:, 1::4] = True
+    w = w * mask
+    w_sparse = to_sparse_semi_structured(w)
+    x = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
     # Correctness gate: dense linear with the same masked weight must match
-    try:
-        out = torch.nn.functional.linear(x, w_sparse)
-        ref = torch.nn.functional.linear(x, w)
-        correctness = allclose_gate(out, ref, rtol=1e-2, atol=1e-2, name="sparse")
-    except Exception as e:
-        correctness = f"FAIL: {type(e).__name__}: {e}"
+    out = torch.nn.functional.linear(x, w_sparse)
+    ref = torch.nn.functional.linear(x, w)
+    correctness = allclose_gate(out, ref, rtol=1e-2, atol=1e-2, name="sparse")
     fn = lambda: torch.nn.functional.linear(x, w_sparse)
     # Sparse 2:4 effective ceiling = fp8 peak (2× dense per cuSPARSELt headline)
     return _gemm_result(name, fn, M_=M, N_=N, K_=K, dtype="sparse_fp8",
@@ -240,11 +196,8 @@ def test_sparse_24() -> Result:
 
 def test_triton_matmul() -> Result:
     name = "triton_matmul_8192_fp16_fixed_tile"
-    try:
-        import triton
-        import triton.language as tl
-    except ImportError as e:
-        return _skip_result(name, f"triton: {e}")
+    import triton
+    import triton.language as tl
 
     @triton.jit
     def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
@@ -280,13 +233,10 @@ def test_triton_matmul() -> Result:
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         tl.store(c_ptrs, c, mask=c_mask)
 
-    try:
-        a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
-        b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
-        c = torch.empty(M, N, device=DEVICE, dtype=torch.float16)
-        BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 256, 64, 8
-    except Exception as e:
-        return _skip_result(name, f"setup: {e}")
+    a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
+    b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
+    c = torch.empty(M, N, device=DEVICE, dtype=torch.float16)
+    BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 256, 64, 8
 
     def run() -> None:
         grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
@@ -299,67 +249,41 @@ def test_triton_matmul() -> Result:
         )
 
     # Correctness: triton output vs torch fp16 matmul reference
-    try:
-        run()
-        torch.cuda.synchronize()
-        ref = a @ b
-        correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2, name="triton")
-    except Exception as e:
-        correctness = f"FAIL: {type(e).__name__}: {e}"
+    run()
+    torch.cuda.synchronize()
+    ref = a @ b
+    correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2, name="triton")
 
     return _gemm_result(name, run, M_=M, N_=N, K_=K,
                         dtype="fp16", correctness=correctness)
 
 
 def test_flash_attn() -> Result:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     B, H, T, D = 4, 32, 4096, 128
-    # Prefer flash_attn (Dao-AI); fall back to torch SDPA-flash.
-    try:
-        from flash_attn import flash_attn_func  # type: ignore
-        name = f"flash_attn_fwd_B{B}H{H}T{T}D{D}_causal"
-        q = torch.randn(B, T, H, D, device=DEVICE, dtype=torch.float16)
-        k = torch.randn(B, T, H, D, device=DEVICE, dtype=torch.float16)
-        v = torch.randn(B, T, H, D, device=DEVICE, dtype=torch.float16)
-        fn = lambda: flash_attn_func(q, k, v, causal=True)
-        return _attn_result(name, fn, B=B, H=H, S=T, D=D, dtype="fp16", causal=True)
-    except ImportError:
-        pass
-
-    # Fallback: torch SDPA, forced flash backend
     name = f"sdpa_flash_fwd_B{B}H{H}T{T}D{D}_causal"
-    try:
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-        q = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
-        k = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
-        v = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
+    q = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
+    k = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
+    v = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
 
-        def run() -> torch.Tensor:
-            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                return torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, is_causal=True)
-    except Exception as e:
-        return _skip_result(name, f"setup: {e}")
+    def run() -> torch.Tensor:
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            return torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=True)
+
     return _attn_result(name, run, B=B, H=H, S=T, D=D, dtype="fp16", causal=True)
 
 
 # ---------- env_info (human output) ----------
 
 def env_info() -> dict:
+    import triton
     info = {
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version(),
+        "triton": triton.__version__,
     }
-    try:
-        import triton
-        info["triton"] = triton.__version__
-    except ImportError:
-        info["triton"] = "(not installed)"
-    try:
-        import flash_attn
-        info["flash_attn"] = flash_attn.__version__
-    except ImportError:
-        info["flash_attn"] = "(not installed)"
     p = torch.cuda.get_device_properties(0)
     info["gpu"] = f"{p.name}, SMs={p.multi_processor_count}, cc={p.major}.{p.minor}, mem={p.total_memory / 1e9:.1f} GB"
     info["arch_list"] = torch.cuda.get_arch_list()
@@ -386,19 +310,13 @@ ALL_TESTS: dict[str, Callable[[], Result]] = {
     "attn": test_flash_attn,
 }
 
-# Tier 2: bandwidth, attn_bwd, rmsnorm, softmax, cross_entropy
-try:
-    from tests_kernels import TESTS as _TIER2_TESTS  # noqa: E402
-    ALL_TESTS.update(_TIER2_TESTS)
-except ImportError:
-    pass
+# Tier 2: attn_bwd, rmsnorm, softmax, cross_entropy
+from tests_kernels import TESTS as _TIER2_TESTS  # noqa: E402
+ALL_TESTS.update(_TIER2_TESTS)
 
 # Tier 2: Triton autotune sweep
-try:
-    from tests_triton_autotune import TESTS as _TIER2_TRITON_TESTS  # noqa: E402
-    ALL_TESTS.update(_TIER2_TRITON_TESTS)
-except ImportError:
-    pass
+from tests_triton_autotune import TESTS as _TIER2_TRITON_TESTS  # noqa: E402
+ALL_TESTS.update(_TIER2_TRITON_TESTS)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -418,41 +336,28 @@ def _run_tests_isolated(test_keys: list[str], env: dict[str, str]) -> list[Resul
     Returns Results parsed from child --json output."""
     out: list[Result] = []
     for key in test_keys:
-        try:
-            # Keep stderr separate: torch/numpy warnings would corrupt JSON if merged.
-            # stderr captured for failure diagnostics.
-            proc = subprocess.run(
-                [sys.executable, str(Path(__file__).resolve()),
-                 "--only", key, "--json", "--no-isolate"],
-                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                check=True,
-            )
-            raw = proc.stdout
-            doc = json.loads(raw)
-            for rd in doc["results"]:
-                stats = Stats(**rd["stats"])
-                out.append(Result(
-                    name=rd["name"], unit=rd["unit"],
-                    measured=rd["measured"], sol=rd["sol"],
-                    sol_score=rd["sol_score"], sol_limit=rd["sol_limit"],
-                    stats=stats, correctness=rd["correctness"],
-                    note=rd["note"], extra=rd.get("extra", {}),
-                ))
-        except subprocess.CalledProcessError as e:
-            tail = (e.stderr or e.stdout or b"")[-240:].decode(errors="replace")
-            out.append(_skip_result(
-                key, f"subprocess exit {e.returncode}: {tail}"))
-        except (json.JSONDecodeError, KeyError) as e:
-            out.append(_skip_result(key, f"parse error: {type(e).__name__}: {e}"))
+        # Keep stderr separate: torch warnings would corrupt JSON if merged.
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()),
+             "--only", key, "--json", "--no-isolate"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=True,
+        )
+        doc = json.loads(proc.stdout)
+        for rd in doc["results"]:
+            stats = Stats(**rd["stats"])
+            out.append(Result(
+                name=rd["name"], unit=rd["unit"],
+                measured=rd["measured"], sol=rd["sol"],
+                sol_score=rd["sol_score"], sol_limit=rd["sol_limit"],
+                stats=stats, correctness=rd["correctness"],
+                extra=rd["extra"],
+            ))
     return out
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    if not torch.cuda.is_available():
-        print("[ERROR] CUDA not available", file=sys.stderr)
-        return 1
-
     global CFG
     CFG = load_config()
 
@@ -486,10 +391,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(_human_row(r))
     else:
         for key, fn in selected:
-            try:
-                r = fn()
-            except Exception:
-                r = _skip_result(key, f"[CRASHED]\n{traceback.format_exc()[:240]}")
+            r = fn()
             results.append(r)
             if not args.json:
                 print(_human_row(r))

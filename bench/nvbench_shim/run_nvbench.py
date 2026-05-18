@@ -1,10 +1,10 @@
 """
-Tier 3: invoke the nvbench C++ shim, parse JSON, emit a Result row.
-Builds the binary on first run via build_nvbench.sh inside docker.
+Tier 3: invoke the nvbench C++ shim, parse JSON, emit Result rows.
 Cross-validates Tier 1 within ±3%.
 
-Build and run use the same cuda:13.2.0-devel image; the binary lives in
-the dgx-spark-build-strict volume, mounted read-only at run time.
+The binary must already exist at
+/work/nvbench_shim/build/sm121_gemm in the dgx-spark-build-strict volume.
+Build it first via bench/nvbench_shim/build_nvbench.sh.
 
 Usage (from host):
   sg docker -c 'python bench/nvbench_shim/run_nvbench.py'
@@ -13,8 +13,6 @@ Usage (from host):
 from __future__ import annotations
 
 import json
-import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,93 +25,41 @@ from _harness import Result, Stats  # noqa: E402
 REPO = Path(__file__).resolve().parent.parent.parent
 VOLUME = "dgx-spark-build-strict"
 DEVEL_IMAGE = "nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04"
+BIN_PATH = "/work/nvbench_shim/build/sm121_gemm"
 
 
-def _docker(args: list[str], extra_flags: list[str] | None = None,
-            capture: bool = False) -> subprocess.CompletedProcess:
-    flags = ["--rm", "--gpus", "all"]
-    if extra_flags:
-        flags += extra_flags
-    cmd = ["docker", "run", *flags,
-           "-v", f"{VOLUME}:/work",
-           "-v", f"{REPO}:/repo:ro",
-           DEVEL_IMAGE, *args]
-    return subprocess.run(cmd, check=False,
-                          stdout=subprocess.PIPE if capture else None,
-                          stderr=subprocess.PIPE if capture else None)
-
-
-def build_if_missing() -> str:
-    """Build nvbench shim if absent from the volume. Returns binary path."""
-    bin_path = "/work/nvbench_shim/build/sm121_gemm"
-    # Probe the volume for the binary
-    probe = subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{VOLUME}:/work",
-         "alpine", "sh", "-c", f"test -x {bin_path} && echo OK || echo MISSING"],
-        capture_output=True, text=True,
-    )
-    if "OK" in probe.stdout:
-        return bin_path
-
-    print(f"[run_nvbench] binary {bin_path} missing — building", file=sys.stderr)
-    res = _docker(
-        ["bash", "/repo/bench/nvbench_shim/build_nvbench.sh"],
-        capture=True,
-    )
-    sys.stderr.write(res.stdout.decode(errors="replace"))
-    sys.stderr.write(res.stderr.decode(errors="replace"))
-    if res.returncode != 0:
-        raise RuntimeError(
-            f"nvbench shim build failed (exit {res.returncode}); "
-            "upstream nvbench may not support sm_121. See stderr above."
-        )
-    return bin_path
-
-
-def run_benchmark(bin_path: str) -> dict:
+def run_benchmark() -> dict:
     """Invoke nvbench binary with --json -; return parsed JSON."""
-    res = _docker(
-        ["bash", "-c", f"{bin_path} --json -"],
-        capture=True,
+    res = subprocess.run(
+        ["docker", "run", "--rm", "--gpus", "all",
+         "-v", f"{VOLUME}:/work",
+         "-v", f"{REPO}:/repo:ro",
+         DEVEL_IMAGE,
+         "bash", "-c", f"{BIN_PATH} --json -"],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    if res.returncode != 0:
-        raise RuntimeError(
-            f"nvbench binary exited {res.returncode}: "
-            f"{res.stderr.decode(errors='replace')[-240:]}"
-        )
     # nvbench JSON is on stdout; logs go to stderr.
     raw = res.stdout.decode(errors="replace")
     # Skip any leading chatter; nvbench JSON starts at the first '{'
-    idx = raw.find("{")
-    if idx < 0:
-        raise ValueError("no JSON found in nvbench output")
+    idx = raw.index("{")
     return json.loads(raw[idx:])
 
 
 def to_results(nvbench_doc: dict) -> list[Result]:
     """Convert nvbench JSON to our Result schema."""
     out: list[Result] = []
-    for b in nvbench_doc.get("benchmarks", []):
+    for b in nvbench_doc["benchmarks"]:
         name = f"nvbench_{b['name']}"
-        for st in b.get("states", []):
-            # Pick the GPU time summary from nvbench's summaries.
-            gpu_summary = next(
-                (s for s in st.get("summaries", [])
-                 if s.get("tag") == "nv/cold/time/gpu/mean"),
-                None,
-            )
-            if gpu_summary is None:
-                continue
+        for st in b["states"]:
+            gpu_summary = next(s for s in st["summaries"]
+                               if s["tag"] == "nv/cold/time/gpu/mean")
             mean_s = float(gpu_summary["data"]["value"]["value"])
             mean_ms = mean_s * 1000.0
             # FLOPs derived from element_count axis (we set it to M·N·K)
-            elem = next(
-                (s for s in st.get("summaries", [])
-                 if s.get("tag") == "nv/cold/bw/global/element_count"),
-                None,
-            )
-            elements = float(elem["data"]["value"]["value"]) if elem else None
-            tflops = (2.0 * elements / mean_s / 1e12) if elements else 0.0
+            elem = next(s for s in st["summaries"]
+                        if s["tag"] == "nv/cold/bw/global/element_count")
+            elements = float(elem["data"]["value"]["value"])
+            tflops = 2.0 * elements / mean_s / 1e12
             # nvbench reports only mean; stats are degenerate.
             stats = Stats(
                 mean_ms=mean_ms, median_ms=mean_ms,
@@ -124,16 +70,15 @@ def to_results(nvbench_doc: dict) -> list[Result]:
             out.append(Result(
                 name=name, unit="TFLOPs", measured=tflops,
                 sol=None, sol_score=None, sol_limit=None,
-                stats=stats, correctness=None, note=None,
-                extra={"nvbench_state": st.get("name"),
-                       "axis_values": st.get("axis_values")},
+                stats=stats, correctness=None,
+                extra={"nvbench_state": st["name"],
+                       "axis_values": st["axis_values"]},
             ))
     return out
 
 
 def main() -> int:
-    bin_path = build_if_missing()
-    doc = run_benchmark(bin_path)
+    doc = run_benchmark()
     results = to_results(doc)
     for r in results:
         sys.stdout.write(

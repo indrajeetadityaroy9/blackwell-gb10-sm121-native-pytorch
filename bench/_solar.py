@@ -11,13 +11,9 @@ Reads sol_config.toml from the same directory. Stdlib-only. Python 3.11+.
 
 from __future__ import annotations
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    raise RuntimeError("bench/_solar.py requires Python 3.11+ (tomllib).")
 
 
 _CFG_PATH = Path(__file__).parent / "sol_config.toml"

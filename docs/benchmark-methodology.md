@@ -116,13 +116,12 @@ Tier 1 output: `bench/logs/run{A,B,C}.json` + `bench/logs/SUMMARY.txt` with a
 
 ## Tier 2 — New kernel coverage
 
-Five tests added in `bench/tests_kernels.py` and one in
+Four tests added in `bench/tests_kernels.py` and one in
 `bench/tests_triton_autotune.py`, integrated into `bench_full.py`'s `ALL_TESTS`:
 
 | Test key | Workload | Unit | SOL basis |
 |---|---|---|---|
-| `bandwidth` | STREAM triad over 1 GiB fp32 | GB/s | GB10 LPDDR5X peak (273 GB/s) |
-| `attn_bwd` | FlashAttention causal backward (B=4 H=32 S=4096 D=128) | TFLOPs | 5·B·H·S²·D causal |
+| `attn_bwd` | SDPA-flash causal backward (B=4 H=32 S=4096 D=128) | TFLOPs | 5·B·H·S²·D causal |
 | `rmsnorm` | `F.rms_norm` on `[8192, 8192]` fp16 | GB/s | bandwidth-bound |
 | `softmax` | `F.softmax` on `[2, 16, 4096, 4096]` fp16 | GB/s | bandwidth-bound |
 | `cross_entropy` | `F.cross_entropy` on `[8192, 128k]` fp32 | GB/s | bandwidth-bound |

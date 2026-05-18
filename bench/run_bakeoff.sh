@@ -95,34 +95,30 @@ A_RC=$?
 log "Run A exit: ${A_RC}"
 
 # ---------- Run B : source-built wheel ----------
-if docker run --rm -v dgx-spark-build-strict:/v alpine \
-     sh -c 'ls /v/pytorch/dist/torch-*.whl 2>/dev/null | head -1' | grep -q '.whl'; then
-  log "Run B : source-built wheel (dgx-spark-build-strict)"
-  docker run --rm --gpus all --ipc=host --shm-size=4g \
-    "${DOCKER_ENV[@]}" \
-    -v dgx-spark-build-strict:/work:ro \
-    -v "$REPO_DIR":/repo:ro \
-    -v "$TRITON_ROOT/runB:/root/.triton/cache" \
-    -v "$LOGS:/logs" \
-    nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04 \
-    bash -c '
-      set -euo pipefail
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq >/dev/null
-      apt-get install -y -qq python3 python3-venv python3-pip ca-certificates \
-        libopenblas0 libnuma1 cudnn9-cuda-13-2 cusparselt-cuda-13 libcusparselt0-cuda-13 >/dev/null
-      python3 -m venv /tmp/v && . /tmp/v/bin/activate
-      pip install -q --upgrade pip 2>&1 | tail -1
-      WHEEL=$(ls /work/pytorch/dist/torch-*.whl | head -1)
-      pip install -q "$WHEEL" 2>&1 | tail -1
-      python /repo/bench/bench_full.py --json > /logs/runB.json 2>>/logs/runB.log
-    ' >>"$LOGS/runB.log" 2>&1
-  B_RC=$?
-  log "Run B exit: ${B_RC}"
-else
-  log "Run B : SKIPPED (no wheel in volume — build first with build/source_build.sh)"
-  B_RC=skipped
-fi
+# Requires bench/build/source_build.sh to have populated dgx-spark-build-strict
+# with /work/pytorch/dist/torch-*.whl; pip install fails fast if absent.
+log "Run B : source-built wheel (dgx-spark-build-strict)"
+docker run --rm --gpus all --ipc=host --shm-size=4g \
+  "${DOCKER_ENV[@]}" \
+  -v dgx-spark-build-strict:/work:ro \
+  -v "$REPO_DIR":/repo:ro \
+  -v "$TRITON_ROOT/runB:/root/.triton/cache" \
+  -v "$LOGS:/logs" \
+  nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04 \
+  bash -c '
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null
+    apt-get install -y -qq python3 python3-venv python3-pip ca-certificates \
+      libopenblas0 libnuma1 cudnn9-cuda-13-2 cusparselt-cuda-13 libcusparselt0-cuda-13 >/dev/null
+    python3 -m venv /tmp/v && . /tmp/v/bin/activate
+    pip install -q --upgrade pip 2>&1 | tail -1
+    WHEEL=$(ls /work/pytorch/dist/torch-*.whl | head -1)
+    pip install -q "$WHEEL" triton 2>&1 | tail -1
+    python /repo/bench/bench_full.py --json > /logs/runB.json 2>>/logs/runB.log
+  ' >>"$LOGS/runB.log" 2>&1
+B_RC=$?
+log "Run B exit: ${B_RC}"
 
 # ---------- Run C : NGC vendor reference ----------
 log "Run C : NGC nvcr.io/nvidia/pytorch:26.04-py3"
