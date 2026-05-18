@@ -99,18 +99,18 @@ def bench(
         RESULTS[name] = None
 
 
-# ------------------------------------------------------------------------------------ #
 # Test 1: FP16 GEMM (baseline, same workload as bench_gemm.py)
-# ------------------------------------------------------------------------------------ #
+
+
 def test_fp16() -> None:
     a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
     b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
     bench("FP16 GEMM 8192^3", lambda: a @ b, flops_per_call=2 * M * N * K)
 
 
-# ------------------------------------------------------------------------------------ #
 # Test 2: FP8 GEMM via torch._scaled_mm (e4m3)
-# ------------------------------------------------------------------------------------ #
+
+
 def test_fp8() -> None:
     name = "FP8 GEMM 8192^3 (e4m3)"
     if not hasattr(torch, "float8_e4m3fn"):
@@ -142,9 +142,9 @@ def test_fp8() -> None:
     )
 
 
-# ------------------------------------------------------------------------------------ #
 # Test 3: FP4 GEMM (mxfp4, best-effort; skipped on every torch that doesn't expose it)
-# ------------------------------------------------------------------------------------ #
+
+
 def test_fp4() -> None:
     name = "FP4 GEMM 8192^3 (e2m1, mxfp4)"
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -184,9 +184,9 @@ def test_fp4() -> None:
     )
 
 
-# ------------------------------------------------------------------------------------ #
 # Test 4: cuSPARSELt 2:4 sparse matmul (semi-structured)
-# ------------------------------------------------------------------------------------ #
+
+
 def test_sparse_24() -> None:
     name = "cuSPARSELt 2:4 sparse mm 8192^3"
     try:
@@ -216,9 +216,9 @@ def test_sparse_24() -> None:
     )
 
 
-# ------------------------------------------------------------------------------------ #
 # Test 5: Triton matmul (hand-written kernel, FP16 in, FP16 out)
-# ------------------------------------------------------------------------------------ #
+
+
 def test_triton_matmul() -> None:
     name = "Triton matmul 8192^3 (FP16)"
     try:
@@ -306,9 +306,9 @@ def test_triton_matmul() -> None:
     bench(name, run, flops_per_call=2 * M * N * K)
 
 
-# ------------------------------------------------------------------------------------ #
 # Test 6: flash-attention forward (prefer flash_attn pkg; fall back to torch SDPA-flash)
-# ------------------------------------------------------------------------------------ #
+
+
 def test_flash_attn() -> None:
     B, H, T, D = 4, 32, 4096, 128
     causal_flops = 2 * B * H * T * T * D  # 2 mm's, causal halves each
@@ -349,7 +349,6 @@ def test_flash_attn() -> None:
     bench(name, run, flops_per_call=causal_flops)
 
 
-# ------------------------------------------------------------------------------------ #
 def main() -> int:
     if not torch.cuda.is_available():
         print("[ERROR] CUDA not available", file=sys.stderr)
