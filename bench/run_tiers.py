@@ -7,22 +7,20 @@ Tiers (deterministic order; any tier raising propagates and aborts the
 wheel's bake-off):
 
   1. optimum-benchmark wall-clock — per YAML in
-     bench/configs/optimum/${BENCH_OPTIMUM_SCENARIO}/
-     Bandwidth-bound regime: tests model-level end-to-end latency.
+     bench/configs/optimum/${BENCH_OPTIMUM_SCENARIO}/.
+     Bandwidth-bound regime: model-level end-to-end latency for
+     Llama-3.1-8B BF16 (prefill + decode + per-token).
 
-  2. Kernel-level GEMM — kernel_bench.py
-     Compute-bound regime: 4 Llama-3-8B projections × 4 dtypes (bf16/fp16/
-     fp8/fp4) at M=512. Tests cuBLAS dispatch quality — where native
-     sm_121 cubins (Run B) should differentiate from PTX-JIT (Runs A, C).
+  2. Kernel-level GEMM — kernel_bench.py per dtype subprocess.
+     Compute-bound regime: 4 Llama-3-8B projections × 4 dtypes (bf16/
+     fp16/fp8/fp4) at M=512 (arith intensity > GB10 crossover ~330
+     FLOPs/byte). Per-dtype subprocess isolation so cuBLAS heuristic-
+     table gaps for FP8/FP4 on sm_121 don't lose BF16/FP16 results.
 
-  3. NCU roofline — profiles kernel_bench.py under `ncu --set roofline`
-     with --filter-mode name + --launch-count 200 to capture per-kernel
-     achieved % of peak across the GEMM shapes.
-
-The FA-4 attention tier is deferred — FA-4 v4.0.0b13 + quack-kernels
-crash on sm_121 (`'NoneType' object has no attribute '_trait'` inside
-`cute.nvgpu.cpasync.tma_partition`). Re-enable when upstream supports
-sm_121 cleanly.
+  3. NCU roofline — profiles the BF16 kernel_bench under
+     `ncu --set roofline --kernel-name regex:...` for per-kernel
+     achieved % of peak. The .ncu-rep is parsed via the ncu_report
+     Python API (SQLite-backed; stable across NCU minor versions).
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch  # noqa: F401  proves torch is importable before tier work
 
 from _harness import Result, emit_json
-from normalize import from_fa4, from_kernel, from_optimum  # noqa: F401  from_fa4 reserved for re-enabling FA-4
+from normalize import from_kernel, from_optimum
 import roofline
 
 

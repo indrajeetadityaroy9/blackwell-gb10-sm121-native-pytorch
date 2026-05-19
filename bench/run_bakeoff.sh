@@ -10,7 +10,7 @@
 # host's hf CLI token; bench containers do not need HF_TOKEN).
 #
 # Env:
-#   BENCH_OPTIMUM_SCENARIO   recommended (default) | wide
+#   BENCH_OPTIMUM_SCENARIO   recommended (default)
 
 set -uo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +36,6 @@ DOCKER_ENV=(
   -e "HF_HUB_CACHE=/hf-cache"
   -e "UV_CACHE_DIR=/root/.cache/uv"
   -e "TRITON_CACHE_DIR=/root/.triton/cache"
-  -e "CUTLASS_CACHE_DIR=/root/.cache/cutlass-jit"
   -e "PYTORCH_KERNEL_CACHE_PATH=/root/.triton/cache"
   -e "HF_HUB_ENABLE_HF_TRANSFER=1"
   -e "HF_TOKEN=$HF_TOKEN_VALUE"
@@ -45,8 +44,7 @@ DOCKER_ENV=(
 )
 
 for v in dgx-spark-hf-cache dgx-spark-uv-cache dgx-spark-apt-cache \
-         dgx-spark-triton-cache-a dgx-spark-triton-cache-b dgx-spark-triton-cache-c \
-         dgx-spark-cutlass-jit-a dgx-spark-cutlass-jit-b dgx-spark-cutlass-jit-c; do
+         dgx-spark-triton-cache-a dgx-spark-triton-cache-b dgx-spark-triton-cache-c; do
   docker volume create "$v" >/dev/null
 done
 
@@ -94,7 +92,6 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash
   -v dgx-spark-hf-cache:/hf-cache \
   -v dgx-spark-uv-cache:/root/.cache/uv \
   -v dgx-spark-triton-cache-a:/root/.triton/cache \
-  -v dgx-spark-cutlass-jit-a:/root/.cache/cutlass-jit \
   -v "$REPO_DIR":/repo:ro \
   -v "$LOGS:/logs" \
   dgx-spark-bench-base:cuda13.2 \
@@ -103,7 +100,6 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash
     uv pip install --system --no-deps --force-reinstall \
       --index-url https://download.pytorch.org/whl/cu130 \
       torch==2.10.0+cu130 >&2
-    # build_fa4.py disabled — FA-4 v4.0.0b13 not yet wired for sm_121
     python3 /repo/bench/run_tiers.py
   ' > "$LOGS/runA.json" 2>>"$LOGS/runA.log"
 A_RC=$?
@@ -117,7 +113,6 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash
   -v dgx-spark-hf-cache:/hf-cache \
   -v dgx-spark-uv-cache:/root/.cache/uv \
   -v dgx-spark-triton-cache-b:/root/.triton/cache \
-  -v dgx-spark-cutlass-jit-b:/root/.cache/cutlass-jit \
   -v "$REPO_DIR":/repo:ro \
   -v "$LOGS:/logs" \
   dgx-spark-bench-base:cuda13.2 \
@@ -125,7 +120,6 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash
     set -uo pipefail
     uv pip install --system --no-deps --force-reinstall \
       "$(ls /work/pytorch/dist/torch-*.whl | head -1)" >&2
-    # build_fa4.py disabled — FA-4 v4.0.0b13 not yet wired for sm_121
     python3 /repo/bench/run_tiers.py
   ' > "$LOGS/runB.json" 2>>"$LOGS/runB.log"
 B_RC=$?
@@ -139,7 +133,6 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash
   -v dgx-spark-uv-cache:/root/.cache/uv \
   -v dgx-spark-apt-cache:/var/cache/apt \
   -v dgx-spark-triton-cache-c:/root/.triton/cache \
-  -v dgx-spark-cutlass-jit-c:/root/.cache/cutlass-jit \
   -v "$REPO_DIR":/repo:ro \
   -v "$LOGS:/logs" \
   nvcr.io/nvidia/pytorch:26.04-py3 \
@@ -150,16 +143,14 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash
     apt-get install -y -qq nsight-compute-2026.1 >&2
     rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED   # PEP 668 escape for system-wide installs
     python3 -m pip install --quiet uv==0.11.15 >&2
-    # Install optimum-benchmark plus a recent transformers (NGC ships
-    # ~4.46 which is missing SpecialTokensMixin that optimum-benchmark
-    # imports). Let uv resolve full transitive deps so Trainer lazy
-    # imports stay consistent.
+    # NGC ships transformers ~4.46 which is missing SpecialTokensMixin
+    # that optimum-benchmark imports. Install a recent transformers and
+    # let uv resolve full transitive deps so Trainer lazy imports stay
+    # consistent. Same GB10 compatibility patches as Dockerfile Layer 5.
     uv pip install --system \
       optimum-benchmark==0.6.0 \
       "transformers>=4.55,<5.0" \
       hf-transfer ncu-report==2025.3.1 >&2
-    # GB10 compatibility patches (candidates for upstream contribution).
-    # See bench/build/Dockerfile.bench-base Layer 6 for the same patches.
     sed -i \
       "s|pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(i)).total|0  # GB10 compat: pending upstream PR|" \
       /usr/local/lib/python3.12/dist-packages/optimum_benchmark/system_utils.py

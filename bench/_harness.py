@@ -82,7 +82,7 @@ class Result:
     """JSON-serializable measurement.
 
     Fields:
-      name      stable identifier (e.g. "fa4_fwd/S=4096/cfg=MHA_d128_H16/causal=T")
+      name      stable identifier (e.g. "kernel/bf16/qkv_proj/M=512/N=12288/K=4096")
       unit      "TFLOPs" / "ms" — interpreted by _summarize.py per row
       measured  absolute measured value in `unit`
       sol       SOL bound in `unit`, or None for tiers that don't model SOL

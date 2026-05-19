@@ -3,12 +3,11 @@
 # unless -y/--force is passed (CI / automation).
 #
 # Volumes:
-#   dgx-spark-build-strict        wheel build artifacts (~25 GB)
-#   dgx-spark-hf-cache            HuggingFace model cache (~80-170 GB)
-#   dgx-spark-uv-cache            uv package cache (~5 GB)
-#   dgx-spark-apt-cache           apt cache for nsight-compute (~2 GB)
+#   dgx-spark-build-strict          source-built torch wheel artifact (~25 GB)
+#   dgx-spark-hf-cache              HuggingFace model cache (~16 GB Llama-3-8B)
+#   dgx-spark-uv-cache              uv package cache (~5 GB)
+#   dgx-spark-apt-cache             apt cache for nsight-compute (~2 GB)
 #   dgx-spark-triton-cache-{a,b,c}  Triton JIT cache, per-wheel (~500 MB each)
-#   dgx-spark-cutlass-jit-{a,b,c}   flash_attn.cute CuTe-DSL JIT (~1 GB each)
 
 set -euo pipefail
 
@@ -18,7 +17,6 @@ VOLUMES=(
   dgx-spark-uv-cache
   dgx-spark-apt-cache
   dgx-spark-triton-cache-a dgx-spark-triton-cache-b dgx-spark-triton-cache-c
-  dgx-spark-cutlass-jit-a dgx-spark-cutlass-jit-b dgx-spark-cutlass-jit-c
 )
 
 echo "About to remove these Docker volumes:"

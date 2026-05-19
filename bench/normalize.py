@@ -3,7 +3,7 @@ Schema adapters for the three bake-off tiers; each returns list[Result].
 
   from_ncu     Nsight Compute roofline report → per-kernel Result
   from_optimum optimum-benchmark Hydra run dir → per-op Result
-  from_fa4     fa4_bench.py stdout JSON       → per-shape Result
+  from_kernel  kernel_bench.py stdout JSON    → per-shape Result
 """
 
 from __future__ import annotations
@@ -92,9 +92,8 @@ def from_optimum(run_dir: Path) -> list[Result]:
     return results
 
 
-def from_subprocess_json(stdout: str, tier: str) -> list[Result]:
-    """Parse a subprocess's stdout JSON (fa4_bench.py, kernel_bench.py) → Results.
-    Stamps the given tier name into each Result.extra."""
+def from_kernel(stdout: str) -> list[Result]:
+    """Parse kernel_bench.py stdout JSON; stamp tier='kernel' into each extra."""
     doc = json.loads(stdout)
     return [
         Result(
@@ -103,15 +102,7 @@ def from_subprocess_json(stdout: str, tier: str) -> list[Result]:
             measured=r["measured"],
             sol=r["sol"],
             stats=Stats(**r["stats"]),
-            extra={**r["extra"], "tier": tier},
+            extra={**r["extra"], "tier": "kernel"},
         )
         for r in doc["results"]
     ]
-
-
-def from_fa4(stdout: str) -> list[Result]:
-    return from_subprocess_json(stdout, "fa4")
-
-
-def from_kernel(stdout: str) -> list[Result]:
-    return from_subprocess_json(stdout, "kernel")
