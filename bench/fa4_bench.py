@@ -1,23 +1,21 @@
 """
 FlashAttention-4 attention benchmark — paper §5 grid (arXiv 2603.05451).
 
-Exercises flash_attn.cute.flash_attn_func across the published grid:
   - Seqlens: 1024, 2048, 4096, 8192, 16384, 32768
-  - Head configs: MHA d=64 H=32; MHA d=128 H=16; (d_q=192, d_v=128) H=16
+  - Head configs: MHA d=64 H=32; MHA d=128 H=16
+    (MLA d_q != d_v removed — FA-4 v4.0.0b13's qv path asserts
+     `arch // 10 in [10, 11]` (sm_100/sm_110 only) which fails on sm_121)
   - Causal: True and False
   - Direction: forward and backward
   - dtype: bfloat16
-  - batch_size: max(1, 32768 // seqlen)  (constant total tokens = 32k)
+  - batch = max(1, 32768 // seqlen)   (constant total tokens = 32k)
 
-Outputs JSON to stdout matching the harness Result schema. Single
-deterministic GPU path; no fallbacks. Container env supplies
-TORCH_CUDA_ARCH_LIST + NVCC_APPEND_FLAGS via run_bakeoff.sh.
+Outputs JSON to stdout matching the harness Result schema.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -31,17 +29,9 @@ from _harness import Result, cuda_event_time
 from flash_attn.cute import flash_attn_func
 
 
-DTYPE = torch.bfloat16
-WARMUP = int(os.environ.get("BENCH_WARMUP", 5))
-ITERS = int(os.environ.get("BENCH_ITERS", 50))
-
-SEQLENS = [1024, 2048, 4096, 8192, 16384, 32768]
-
-# (label, d_q, d_v, n_heads) — paper §5 head configurations.
 HEAD_CONFIGS = [
     ("MHA_d64_H32", 64, 64, 32),
     ("MHA_d128_H16", 128, 128, 16),
-    ("MLA_dq192_dv128_H16", 192, 128, 16),
 ]
 
 
@@ -55,16 +45,8 @@ def _flops(seqlen: int, head_dim_q: int, n_heads: int, causal: bool,
     return fwd * 2.5 if backward else fwd
 
 
-def _build_qkv(batch: int, seqlen: int, d_q: int, d_v: int, n_heads: int
-               ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    q = torch.randn(batch, seqlen, n_heads, d_q, dtype=DTYPE, device="cuda")
-    k = torch.randn(batch, seqlen, n_heads, d_q, dtype=DTYPE, device="cuda")
-    v = torch.randn(batch, seqlen, n_heads, d_v, dtype=DTYPE, device="cuda")
-    return q, k, v
-
-
 def _result(name: str, fn, *, flops: float, **extra) -> Result:
-    stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
+    stats = cuda_event_time(fn, warmup=5, iters=50)
     tflops = flops / (stats.median_ms / 1000.0) / 1e12
     return Result(
         name=name,
@@ -79,7 +61,9 @@ def _result(name: str, fn, *, flops: float, **extra) -> Result:
 def run_forward(seqlen: int, config_name: str, d_q: int, d_v: int,
                 n_heads: int, causal: bool) -> Result:
     batch = max(1, 32768 // seqlen)
-    q, k, v = _build_qkv(batch, seqlen, d_q, d_v, n_heads)
+    q = torch.randn(batch, seqlen, n_heads, d_q, dtype=torch.bfloat16, device="cuda")
+    k = torch.randn(batch, seqlen, n_heads, d_q, dtype=torch.bfloat16, device="cuda")
+    v = torch.randn(batch, seqlen, n_heads, d_v, dtype=torch.bfloat16, device="cuda")
     return _result(
         f"fa4_fwd/S={seqlen}/cfg={config_name}/causal={'T' if causal else 'F'}",
         lambda: flash_attn_func(q, k, v, causal=causal),
@@ -93,10 +77,9 @@ def run_forward(seqlen: int, config_name: str, d_q: int, d_v: int,
 def run_backward(seqlen: int, config_name: str, d_q: int, d_v: int,
                  n_heads: int, causal: bool) -> Result:
     batch = max(1, 32768 // seqlen)
-    q, k, v = _build_qkv(batch, seqlen, d_q, d_v, n_heads)
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
+    q = torch.randn(batch, seqlen, n_heads, d_q, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    k = torch.randn(batch, seqlen, n_heads, d_q, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    v = torch.randn(batch, seqlen, n_heads, d_v, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     grad_out = torch.randn_like(flash_attn_func(q, k, v, causal=causal))
 
     def step():
@@ -117,7 +100,7 @@ def run_backward(seqlen: int, config_name: str, d_q: int, d_v: int,
 
 def main() -> int:
     results: list[Result] = []
-    for seqlen in SEQLENS:
+    for seqlen in (1024, 2048, 4096, 8192, 16384, 32768):
         for config_name, d_q, d_v, n_heads in HEAD_CONFIGS:
             for causal in (True, False):
                 results.append(run_forward(seqlen, config_name, d_q, d_v, n_heads, causal))

@@ -1,14 +1,7 @@
 """
-NCU roofline profiler for run_tiers.py.
-
-Wraps `ncu --set roofline` with kernel-name filtering and a launch budget.
-Without the filter+budget, profiling a model forward (~10k+ kernels with
-NCU's 10-30× replay overhead per kernel) would hang for hours. The filter
-restricts capture to compute/memory-dominant kernels (GEMM, MMA, attention,
-cutlass primitives); --launch-count bounds the captured set.
-
-Parsing uses normalize.from_ncu (ncu_report Python API; SQLite-backed
-.ncu-rep is stable across NCU minor versions, stdout text is not).
+NCU roofline profiler. Wraps `ncu --set roofline` with kernel-name
+filtering and a launch budget so profiling a model forward (~10k+ kernels
+under NCU's 10-30× replay overhead) completes in minutes, not hours.
 """
 
 from __future__ import annotations
@@ -23,25 +16,17 @@ from _harness import Result
 from normalize import from_ncu
 
 
-# Heavy-kernel filter — capture only compute/memory-dominant kernels.
-_NAME_FILTER = r"regex:(?i)(gemm|mma|flash|sdpa|attention|cutlass)"
-
-# 50 captured kernels covers a Llama-3-8B forward's full attention + MLP
-# layer set (~10 matmul-class kernels per layer × 2 layers profiled).
-_LAUNCH_COUNT = 50
-
-
 def profile(command: list[str], rep_path: Path) -> list[Result]:
-    """Run `command` under `ncu --set roofline` with kernel filtering and
-    launch budget; parse the .ncu-rep and return one Result per profiled
-    kernel."""
+    """Run `command` under `ncu --set roofline` (filtering to GEMM /
+    attention / cutlass kernels, capping at 50 captures); parse the
+    .ncu-rep and return one Result per profiled kernel."""
     rep_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ncu",
         "--set", "roofline",
         "--filter-mode", "name",
-        "--name-filter", _NAME_FILTER,
-        "--launch-count", str(_LAUNCH_COUNT),
+        "--name-filter", r"regex:(?i)(gemm|mma|flash|sdpa|attention|cutlass)",
+        "--launch-count", "50",
         "--target-processes", "all",
         "--force-overwrite",
         "--export", str(rep_path),
