@@ -29,3 +29,8 @@ hydra:
     dir: /logs/optimum/${name}
   job:
     chdir: true
+    env_set:
+      # Force optimum-benchmark to re-run benchmarks whose output dir
+      # already exists from a previous wheel — required for sequential
+      # A→B→C bake-off in the same /logs volume.
+      OVERRIDE_BENCHMARKS: "1"

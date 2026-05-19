@@ -24,9 +24,13 @@ def profile(command: list[str], rep_path: Path) -> list[Result]:
     cmd = [
         "ncu",
         "--set", "roofline",
-        "--filter-mode", "name",
-        "--name-filter", r"regex:(?i)(gemm|mma|flash|sdpa|attention|cutlass)",
-        "--launch-count", "50",
+        # NCU 2026.1 syntax: --kernel-name regex:<expr> for name filtering.
+        # The older --name-filter / --filter-mode pair isn't recognized.
+        "--kernel-name", r"regex:(?i)(gemm|mma|flash|sdpa|attention|cutlass)",
+        # Budget 200 captures ~3-5 launches per unique GEMM kernel for
+        # kernel_bench (16 shapes × multiple iters); enough for stable
+        # per-kernel achieved-% values without exploding NCU replay time.
+        "--launch-count", "200",
         "--target-processes", "all",
         "--force-overwrite",
         "--export", str(rep_path),
@@ -34,5 +38,7 @@ def profile(command: list[str], rep_path: Path) -> list[Result]:
         *command,
     ]
     print(f"[roofline] {' '.join(cmd)}", file=sys.stderr)
-    subprocess.run(cmd, check=True)
+    # NCU writes "==PROF==" progress lines to stdout; redirect to stderr so
+    # they don't corrupt the JSON document run_tiers.py emits on its stdout.
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
     return from_ncu(rep_path)

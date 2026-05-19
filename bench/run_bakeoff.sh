@@ -17,6 +17,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOGS="$REPO_DIR/bench/logs"; mkdir -p "$LOGS"
 
 SCENARIO="${BENCH_OPTIMUM_SCENARIO:-recommended}"
+HF_TOKEN_VALUE="$(hf auth token)"
 
 ts()  { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 log() { echo "[$(ts)] $*"; }
@@ -32,11 +33,13 @@ DOCKER_ENV=(
   -e "BENCH_OPTIMUM_SCENARIO=$SCENARIO"
   -e "BENCH_LOG_DIR=/logs"
   -e "HF_HOME=/hf-cache"
+  -e "HF_HUB_CACHE=/hf-cache"
   -e "UV_CACHE_DIR=/root/.cache/uv"
   -e "TRITON_CACHE_DIR=/root/.triton/cache"
   -e "CUTLASS_CACHE_DIR=/root/.cache/cutlass-jit"
   -e "PYTORCH_KERNEL_CACHE_PATH=/root/.triton/cache"
   -e "HF_HUB_ENABLE_HF_TRANSFER=1"
+  -e "HF_TOKEN=$HF_TOKEN_VALUE"
   -e "TORCH_CUDA_ARCH_LIST=12.1;12.1a"
   -e "NVCC_APPEND_FLAGS=-gencode arch=compute_121,code=sm_121a -ptxas-options=-O3 -D__CUDA_ARCH_FEAT_SM90_ALL"
 )
@@ -49,14 +52,17 @@ done
 
 # Clock-lock controller (--privileged; bench containers stay unprivileged
 # except for --cap-add=SYS_ADMIN which NCU's HW counters require).
+# NOTE: ERR intentionally omitted from the trap. With ERR, the first
+# failing `docker run` fires the trap immediately, exit "$rc" terminates
+# the script, and Runs B and C never execute. Per-wheel independence is
+# the whole point of the bake-off — we capture A_RC/B_RC/C_RC and let
+# the next run proceed even if its predecessor fails.
 cleanup() {
-  local rc=$?
   log "cleanup: stopping clock-lock controller"
   docker exec dgx-bench-clocklock nvidia-smi --reset-gpu-clocks >/dev/null 2>&1 || true
   docker rm -f dgx-bench-clocklock >/dev/null 2>&1 || true
-  exit "$rc"
 }
-trap cleanup EXIT INT TERM ERR
+trap cleanup EXIT INT TERM
 
 log "spawning clock-lock controller (2418 MHz)"
 docker rm -f dgx-bench-clocklock >/dev/null 2>&1 || true
@@ -83,7 +89,7 @@ log "clock lock active; scenario=$SCENARIO"
 
 # ============================ Run A : PyPI torch==2.10.0+cu130 ============================
 log "Run A : PyPI torch==2.10.0+cu130"
-docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN \
+docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash \
   "${DOCKER_ENV[@]}" \
   -v dgx-spark-hf-cache:/hf-cache \
   -v dgx-spark-uv-cache:/root/.cache/uv \
@@ -92,20 +98,20 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN \
   -v "$REPO_DIR":/repo:ro \
   -v "$LOGS:/logs" \
   dgx-spark-bench-base:cuda13.2 \
-  bash -c '
+  -c '
     set -uo pipefail
     uv pip install --system --no-deps --force-reinstall \
       --index-url https://download.pytorch.org/whl/cu130 \
       torch==2.10.0+cu130 >&2
-    python /repo/bench/build/build_fa4.py >&2
-    python /repo/bench/run_tiers.py
+    # build_fa4.py disabled — FA-4 v4.0.0b13 not yet wired for sm_121
+    python3 /repo/bench/run_tiers.py
   ' > "$LOGS/runA.json" 2>>"$LOGS/runA.log"
 A_RC=$?
 log "Run A exit: ${A_RC}"
 
 # ============================ Run B : source-built wheel ============================
 log "Run B : source-built wheel (dgx-spark-build-strict)"
-docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN \
+docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash \
   "${DOCKER_ENV[@]}" \
   -v dgx-spark-build-strict:/work:ro \
   -v dgx-spark-hf-cache:/hf-cache \
@@ -115,19 +121,19 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN \
   -v "$REPO_DIR":/repo:ro \
   -v "$LOGS:/logs" \
   dgx-spark-bench-base:cuda13.2 \
-  bash -c '
+  -c '
     set -uo pipefail
     uv pip install --system --no-deps --force-reinstall \
       "$(ls /work/pytorch/dist/torch-*.whl | head -1)" >&2
-    python /repo/bench/build/build_fa4.py >&2
-    python /repo/bench/run_tiers.py
+    # build_fa4.py disabled — FA-4 v4.0.0b13 not yet wired for sm_121
+    python3 /repo/bench/run_tiers.py
   ' > "$LOGS/runB.json" 2>>"$LOGS/runB.log"
 B_RC=$?
 log "Run B exit: ${B_RC}"
 
 # ============================ Run C : NGC vendor reference ============================
 log "Run C : NGC nvcr.io/nvidia/pytorch:26.04-py3"
-docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN \
+docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN --entrypoint /bin/bash \
   "${DOCKER_ENV[@]}" \
   -v dgx-spark-hf-cache:/hf-cache \
   -v dgx-spark-uv-cache:/root/.cache/uv \
@@ -137,24 +143,30 @@ docker run --rm --gpus all --ipc=host --cap-add=SYS_ADMIN \
   -v "$REPO_DIR":/repo:ro \
   -v "$LOGS:/logs" \
   nvcr.io/nvidia/pytorch:26.04-py3 \
-  bash -c '
+  -c '
     set -uo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >&2
     apt-get install -y -qq nsight-compute-2026.1 >&2
+    rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED   # PEP 668 escape for system-wide installs
     python3 -m pip install --quiet uv==0.11.15 >&2
-    uv pip install --system hf-transfer ncu-report==2025.3.1 >&2
-    uv pip install --system --no-deps --force-reinstall \
-      "triton>=3.6" "nvidia-cutlass-dsl>=4.4.2" \
-      "transformers>=4.55,<5.0" "accelerate>=1.0" \
-      bitsandbytes==0.49.2 \
-      optimum-benchmark==0.6.0 flash-attn-4==4.0.0b13 >&2
+    # Install optimum-benchmark plus a recent transformers (NGC ships
+    # ~4.46 which is missing SpecialTokensMixin that optimum-benchmark
+    # imports). Let uv resolve full transitive deps so Trainer lazy
+    # imports stay consistent.
     uv pip install --system \
-      hydra-core>=1.3 omegaconf>=2.3 psutil pyyaml typing_extensions tqdm \
-      safetensors huggingface_hub sentencepiece tokenizers protobuf \
-      einops "apache-tvm-ffi>=0.1.5,<0.2" torch-c-dlpack-ext "quack-kernels>=0.4.0" >&2
-    python /repo/bench/build/build_fa4.py >&2
-    python /repo/bench/run_tiers.py
+      optimum-benchmark==0.6.0 \
+      "transformers>=4.55,<5.0" \
+      hf-transfer ncu-report==2025.3.1 >&2
+    # GB10 compatibility patches (candidates for upstream contribution).
+    # See bench/build/Dockerfile.bench-base Layer 6 for the same patches.
+    sed -i \
+      "s|pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(i)).total|0  # GB10 compat: pending upstream PR|" \
+      /usr/local/lib/python3.12/dist-packages/optimum_benchmark/system_utils.py
+    sed -i \
+      "s|torch.distributed.is_initialized()|getattr(torch.distributed, \"is_initialized\", lambda: False)()|" \
+      /usr/local/lib/python3.12/dist-packages/optimum_benchmark/backends/pytorch/backend.py
+    python3 /repo/bench/run_tiers.py
   ' > "$LOGS/runC.json" 2>>"$LOGS/runC.log"
 C_RC=$?
 log "Run C exit: ${C_RC}"

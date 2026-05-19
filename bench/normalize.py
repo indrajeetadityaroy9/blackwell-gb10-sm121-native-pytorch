@@ -73,8 +73,10 @@ def from_optimum(run_dir: Path) -> list[Result]:
             "model": model_id,
             "op": op_name,
         }
-        if "throughput" in op_data:
-            thr = op_data["throughput"]
+        # throughput is non-None only for ops that measure it (generate,
+        # forward, decode); None for ops like `load` that report latency only.
+        thr = op_data.get("throughput")
+        if thr is not None:
             extra["throughput"] = thr["value"]
             extra["throughput_unit"] = thr["unit"]
 
@@ -90,8 +92,9 @@ def from_optimum(run_dir: Path) -> list[Result]:
     return results
 
 
-def from_fa4(stdout: str) -> list[Result]:
-    """Parse fa4_bench.py stdout JSON; stamp tier='fa4' into each extra."""
+def from_subprocess_json(stdout: str, tier: str) -> list[Result]:
+    """Parse a subprocess's stdout JSON (fa4_bench.py, kernel_bench.py) → Results.
+    Stamps the given tier name into each Result.extra."""
     doc = json.loads(stdout)
     return [
         Result(
@@ -100,7 +103,15 @@ def from_fa4(stdout: str) -> list[Result]:
             measured=r["measured"],
             sol=r["sol"],
             stats=Stats(**r["stats"]),
-            extra={**r["extra"], "tier": "fa4"},
+            extra={**r["extra"], "tier": tier},
         )
         for r in doc["results"]
     ]
+
+
+def from_fa4(stdout: str) -> list[Result]:
+    return from_subprocess_json(stdout, "fa4")
+
+
+def from_kernel(stdout: str) -> list[Result]:
+    return from_subprocess_json(stdout, "kernel")
