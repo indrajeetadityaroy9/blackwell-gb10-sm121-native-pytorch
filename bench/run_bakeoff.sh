@@ -61,8 +61,16 @@ if ! docker image inspect "$BENCH_BASE_IMAGE" >/dev/null 2>&1; then
 fi
 
 # ---------- forward env into each docker run ----------
-DOCKER_ENV=(-e "BENCH_OPTIMUM_SCENARIO=$SCENARIO"
-            -e "HF_HUB_ENABLE_HF_TRANSFER=1")
+# TORCH_CUDA_ARCH_LIST + NVCC_APPEND_FLAGS used by:
+#   - cpp_extension when FA-4 / CuTe-DSL JIT-compiles inside the container
+#   - the source-build wheel build (when invoked separately)
+# Set unconditionally so every wheel sees the same target arch.
+DOCKER_ENV=(
+  -e "BENCH_OPTIMUM_SCENARIO=$SCENARIO"
+  -e "HF_HUB_ENABLE_HF_TRANSFER=1"
+  -e "TORCH_CUDA_ARCH_LIST=12.1;12.1a"
+  -e "NVCC_APPEND_FLAGS=-gencode arch=compute_121,code=sm_121a -ptxas-options=-O3 -D__CUDA_ARCH_FEAT_SM90_ALL"
+)
 [[ -n "${HF_TOKEN:-}" ]] && DOCKER_ENV+=(-e "HF_TOKEN=$HF_TOKEN")
 
 # ---------- per-wheel docker volumes ----------

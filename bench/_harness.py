@@ -1,12 +1,9 @@
 """
-Harness primitives for DGX Spark GB10 bake-off.
-
-Provides:
-  - L2 cache flushing (cold-cache iterations)
-  - CUDA event timing (kernel-only)
-  - Stats aggregation (mean/median/p10/p90/stdev) via stdlib statistics
-  - JSON-serializable Result schema
-  - Subprocess isolation for per-test memory cleanup
+Harness primitives for the GB10 bake-off:
+  - Stats: latency aggregation from N samples (mean/median/p10/p90/stdev)
+  - L2Flusher: cold-cache reset between iterations (GB10 L2 = 24 MB)
+  - cuda_event_time: kernel-only CUDA-event timing with cold L2
+  - Result + emit_json: JSON-serializable schema consumed by _summarize.py
 
 Stdlib only — numpy is not assumed in every container.
 """
@@ -14,19 +11,13 @@ Stdlib only — numpy is not assumed in every container.
 from __future__ import annotations
 
 import json
-import os
 import statistics
-import subprocess
-import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 import torch
-
-_BENCH_DIR = Path(__file__).parent
-_ENTRYPOINT = _BENCH_DIR / "run_tiers.py"
 
 
 # ---------- statistics ----------
@@ -41,7 +32,7 @@ class Stats:
     p10_ms: float
     p90_ms: float
     stdev_ms: float
-    stdev_pct: float  # stdev_ms / mean_ms × 100 — easier to eyeball than raw stdev
+    stdev_pct: float  # stdev_ms / mean_ms × 100
     min_ms: float
     max_ms: float
     n: int
@@ -52,10 +43,8 @@ class Stats:
         if n == 0:
             raise ValueError("Stats.from_samples requires at least 1 sample")
         mean = statistics.fmean(samples_ms)
-        # statistics.median is robust to single-sample input; quantiles needs n>=2
         median = statistics.median(samples_ms)
         if n >= 2:
-            # p10/p90 via inclusive method (matches numpy default)
             quantiles = statistics.quantiles(samples_ms, n=10, method="inclusive")
             p10, p90 = quantiles[0], quantiles[-1]
             stdev = statistics.stdev(samples_ms)
@@ -80,15 +69,14 @@ class Stats:
 
 
 class L2Flusher:
-    """Cold-cache reset between iterations (SOL-ExecBench).
-    GB10 L2 = 24 MB; 2× L2 = 48 MB is enough to evict prior footprint."""
+    """Cold-cache reset between iterations. GB10 L2 = 24 MB; 2× L2 = 48 MB
+    is enough to evict any prior kernel footprint."""
 
     DEFAULT_MB = 48
 
-    def __init__(self, size_mb: int = DEFAULT_MB, device: str = "cuda"):
+    def __init__(self, size_mb: int = DEFAULT_MB):
         n = size_mb * 1024 * 1024 // 4  # int32 elements
-        self.buf = torch.zeros(n, dtype=torch.int32, device=device)
-        self.size_mb = size_mb
+        self.buf = torch.zeros(n, dtype=torch.int32, device="cuda")
 
     def flush(self) -> None:
         self.buf.zero_()
@@ -101,25 +89,22 @@ def cuda_event_time(
     fn: Callable[[], Any],
     warmup: int = 5,
     iters: int = 50,
-    flush: bool = True,
 ) -> Stats:
-    """Kernel-only timing via CUDA events with cold-cache L2 flush.
-    Flush is queued on the same stream before start.record(), so the
-    timed window measures only fn() with a cold L2."""
-    flusher = L2Flusher() if flush else None
-    # Discard initialization, autotune, lazy compile costs
+    """Kernel-only timing via CUDA events with cold-cache L2 flush between
+    every timed iteration. Single deterministic GPU path; flush is always
+    on (the bake-off has no warm-cache regime)."""
+    flusher = L2Flusher()
     for _ in range(warmup):
-        _ = fn()
+        fn()
     torch.cuda.synchronize()
 
     samples: list[float] = []
     for _ in range(iters):
-        if flusher is not None:
-            flusher.flush()
+        flusher.flush()
         s = torch.cuda.Event(enable_timing=True)
         e = torch.cuda.Event(enable_timing=True)
         s.record()
-        _ = fn()
+        fn()
         e.record()
         torch.cuda.synchronize()
         samples.append(s.elapsed_time(e))  # ms
@@ -132,27 +117,33 @@ def cuda_event_time(
 
 @dataclass
 class Result:
-    """Single test result. JSON-serializable; emitted under --json."""
+    """JSON-serializable measurement.
 
-    name: str  # test key, e.g. "fp16_gemm"
-    unit: str  # "TFLOPs" or "GB/s"
-    measured: float  # throughput in `unit`
-    sol: float | None  # SOL bound, same unit; None if unmodeled
-    sol_score: float | None  # in [0, 1]; None if baseline/SOL unknown
-    sol_limit: str | None  # "compute" or "bandwidth"
+    Fields:
+      name      stable identifier (e.g. "fa4_fwd/S=4096/cfg=MHA_d128_H16/causal=T")
+      unit      "TFLOPs" / "ms" / "tokens/s" — interpreted by _summarize.py per row
+      measured  absolute measured value in `unit`
+      sol       SOL bound in `unit`, or None for tiers that don't model SOL
+                (back-derived from NCU achieved-% for the roofline tier).
+      stats     Stats over the timed iterations
+      extra     free-form per-tier metadata (must include "tier": str)
+    """
+
+    name: str
+    unit: str
+    measured: float
+    sol: float | None
     stats: Stats
-    correctness: str | None  # "PASS" / "FAIL" / None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
+        return asdict(self)
 
 
 def emit_json(results: list[Result], path: Path | None = None) -> None:
     """Write JSON document. If path is None, write to stdout."""
     doc = {
-        "schema_version": 1,
+        "schema_version": 2,
         "ts": time.time(),
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
@@ -165,52 +156,3 @@ def emit_json(results: list[Result], path: Path | None = None) -> None:
         print(s)
     else:
         path.write_text(s)
-
-
-# ---------- Subprocess isolation ----------
-
-
-def run_isolated(test_name: str, env_overrides: dict[str, str] | None = None) -> dict:
-    """Spawn one test in its own subprocess (SOL-ExecBench isolation).
-    Returns the parsed JSON document the child wrote to stdout."""
-    env = dict(os.environ)
-    if env_overrides:
-        env.update(env_overrides)
-    out = subprocess.check_output(
-        [sys.executable, str(_ENTRYPOINT), "--only", test_name, "--json"],
-        env=env,
-        stderr=subprocess.STDOUT,
-    )
-    return json.loads(out)
-
-
-# ---------- Correctness gate helper ----------
-
-
-def allclose_gate(
-    actual: torch.Tensor,
-    reference: torch.Tensor,
-    rtol: float = 1e-2,
-    atol: float = 1e-2,
-    name: str = "test",
-) -> str:
-    """Return 'PASS' or 'FAIL: max|diff|=...'."""
-    if torch.allclose(actual.float(), reference.float(), rtol=rtol, atol=atol):
-        return "PASS"
-    max_diff = (actual.float() - reference.float()).abs().max().item()
-    return f"FAIL: max|diff|={max_diff:.4g} (rtol={rtol}, atol={atol})"
-
-
-# ---------- Self-test ----------
-
-if __name__ == "__main__":
-    print("smoke test on CPU stats:")
-    s = Stats.from_samples([10.0, 11.0, 9.5, 10.5, 10.2])
-    print(
-        f"  mean={s.mean_ms:.2f} median={s.median_ms:.2f} stdev_pct={s.stdev_pct:.2f}"
-    )
-    print("  expected mean ~10.24, stdev_pct ~5%")
-
-    print("\nsmoke test cuda_event_time(no-op):")
-    st = cuda_event_time(lambda: torch.cuda.synchronize(), warmup=2, iters=5)
-    print(f"  no-op median={st.median_ms:.4f} ms over {st.n} iters")

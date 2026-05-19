@@ -1,11 +1,12 @@
 """
-Aggregate bench/logs/run{A,B,C}.json into SUMMARY.txt with SOL Scores.
+Aggregate bench/logs/run{A,B,C}.json → SUMMARY.txt with gap-closure scores.
 
 Run A is the baseline:
-  SOL Score(wheel, test) = (measured − baselineA) / (sol − baselineA)
-N/A when Run A skipped.
+  Score(wheel, test) = clamp((measured - baseline) / (sol - baseline), [0,1])
+  where sol is non-None only for the roofline tier (NCU-back-derived
+  hardware peak); other tiers render the score column as '—'.
 
-Usage: python bench/_summarize.py [bench/logs/]
+Usage: python bench/_summarize.py <logs_dir>
 """
 
 from __future__ import annotations
@@ -13,15 +14,13 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
+
 WHEELS = [
-    ("A", "PyPI torch==2.9.0+cu130 + triton"),
-    ("B", "Source-built wheel (native sm_121 cubins)"),
-    ("C", "NGC pytorch:26.04-py3 (vendor reference)"),
+    ("A", "PyPI torch==2.10.0+cu130"),
+    ("B", "Source-built wheel (native sm_121 / sm_121a cubins)"),
+    ("C", "NGC pytorch:26.04-py3"),
 ]
-
-
-def load_run(path: Path) -> dict:
-    return json.loads(path.read_text())
 
 
 def sol_score(measured: float, baseline: float, sol: float | None) -> float | None:
@@ -31,10 +30,12 @@ def sol_score(measured: float, baseline: float, sol: float | None) -> float | No
 
 
 def main() -> int:
-    logs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "logs"
-    runs = {label: load_run(logs_dir / f"run{label}.json") for label, _ in WHEELS}
+    logs_dir = Path(sys.argv[1])
+    runs = {
+        label: json.loads((logs_dir / f"run{label}.json").read_text())
+        for label, _ in WHEELS
+    }
 
-    # Index per (wheel, test_name) -> result dict
     by_test: dict[str, dict[str, dict]] = {}
     for label, doc in runs.items():
         for r in doc["results"]:
@@ -48,8 +49,6 @@ def main() -> int:
     out.append(f"Device: {meta['device_name']}  arch_list={meta['arch_list']}")
     out.append("")
 
-    # Per-wheel detail blocks. Tier label (roofline/optimum/fa4) sourced from
-    # Result.extra["tier"] populated by bench/normalize.py; falls back to "?".
     for label, desc in WHEELS:
         doc = runs[label]
         out.append(f"--- Run {label}: {desc} ---")
@@ -57,23 +56,20 @@ def main() -> int:
         for name in test_names:
             r = by_test[name][label]
             stats = r["stats"]
-            tier = (r.get("extra") or {}).get("tier", "?")
+            tier = r["extra"]["tier"]
             out.append(
                 f"  [{tier:8s}] {name:42s} : {r['measured']:7.2f} {r['unit']:6s} "
                 f"(med={stats['median_ms']:.2f}ms, σ={stats['stdev_pct']:.1f}%, n={stats['n']})"
             )
         out.append("")
 
-    # SOL Score table — Run A is baseline. The roofline tier populates sol
-    # from NCU's back-derived hardware peak; optimum and fa4 tiers leave
-    # sol=None which renders as "—".
-    out.append("--- SOL Score vs Run A baseline ---")
+    out.append("--- Score vs Run A baseline ---")
     out.append(f"  {'tier':10s} {'test':<42s}   A(base)     B    score_B     C    score_C    SOL")
     for name in test_names:
         rA, rB, rC = by_test[name]["A"], by_test[name]["B"], by_test[name]["C"]
         baseline = rA["measured"]
         sol = rA["sol"]
-        tier = (rA.get("extra") or {}).get("tier", "?")
+        tier = rA["extra"]["tier"]
         row = [f"  [{tier:8s}] {name:<42s}", f"  {baseline:7.2f}"]
         for r in (rB, rC):
             m = r["measured"]
