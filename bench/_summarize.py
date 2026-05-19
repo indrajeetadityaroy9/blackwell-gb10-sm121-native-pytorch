@@ -48,7 +48,8 @@ def main() -> int:
     out.append(f"Device: {meta['device_name']}  arch_list={meta['arch_list']}")
     out.append("")
 
-    # Per-wheel detail blocks
+    # Per-wheel detail blocks. Tier label (roofline/optimum/fa4) sourced from
+    # Result.extra["tier"] populated by bench/normalize.py; falls back to "?".
     for label, desc in WHEELS:
         doc = runs[label]
         out.append(f"--- Run {label}: {desc} ---")
@@ -56,20 +57,24 @@ def main() -> int:
         for name in test_names:
             r = by_test[name][label]
             stats = r["stats"]
+            tier = (r.get("extra") or {}).get("tier", "?")
             out.append(
-                f"  {name:42s} : {r['measured']:7.2f} {r['unit']:6s} "
+                f"  [{tier:8s}] {name:42s} : {r['measured']:7.2f} {r['unit']:6s} "
                 f"(med={stats['median_ms']:.2f}ms, σ={stats['stdev_pct']:.1f}%, n={stats['n']})"
             )
         out.append("")
 
-    # SOL Score table — Run A is baseline
+    # SOL Score table — Run A is baseline. The roofline tier populates sol
+    # from NCU's back-derived hardware peak; optimum and fa4 tiers leave
+    # sol=None which renders as "—".
     out.append("--- SOL Score vs Run A baseline ---")
-    out.append(f"  {'test':<42s}   A(base)     B    score_B     C    score_C    SOL")
+    out.append(f"  {'tier':10s} {'test':<42s}   A(base)     B    score_B     C    score_C    SOL")
     for name in test_names:
         rA, rB, rC = by_test[name]["A"], by_test[name]["B"], by_test[name]["C"]
         baseline = rA["measured"]
         sol = rA["sol"]
-        row = [f"  {name:<42s}", f"  {baseline:7.2f}"]
+        tier = (rA.get("extra") or {}).get("tier", "?")
+        row = [f"  [{tier:8s}] {name:<42s}", f"  {baseline:7.2f}"]
         for r in (rB, rC):
             m = r["measured"]
             s = sol_score(m, baseline, sol)

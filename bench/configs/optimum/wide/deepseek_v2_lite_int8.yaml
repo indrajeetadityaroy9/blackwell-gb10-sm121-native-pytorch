@@ -1,0 +1,30 @@
+defaults:
+  - benchmark
+  - scenario: inference
+  - launcher: process
+  - backend: pytorch
+  - _base_
+  - _self_
+
+# DeepSeek-V2-Lite (16B active, 2.4B activated) — NOT DeepSeek-V3 (671B,
+# does not fit GB10 at any practical precision). V2-Lite is the largest
+# DeepSeek MoE that fits 124 GB while exercising the same MoE dispatch
+# code paths as V3.
+name: deepseek_v2_lite_int8
+
+backend:
+  model: deepseek-ai/DeepSeek-V2-Lite
+  torch_dtype: bfloat16
+  no_weights: false
+  quantization_scheme: bnb
+  quantization_config:
+    load_in_8bit: true
+  trust_remote_code: true
+
+scenario:
+  input_shapes:
+    batch_size: 1
+    sequence_length: 512
+  generate_kwargs:
+    max_new_tokens: 128
+    min_new_tokens: 128

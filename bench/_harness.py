@@ -1,15 +1,14 @@
 """
-SOL-ExecBench harness primitives for DGX Spark GB10.
+Harness primitives for DGX Spark GB10 bake-off.
 
 Provides:
   - L2 cache flushing (cold-cache iterations)
   - CUDA event timing (kernel-only)
   - Stats aggregation (mean/median/p10/p90/stdev) via stdlib statistics
-  - SOL Score (re-exported from _solar)
   - JSON-serializable Result schema
   - Subprocess isolation for per-test memory cleanup
 
-Stdlib only — numpy is not installed in Run A or Run B containers.
+Stdlib only — numpy is not assumed in every container.
 """
 
 from __future__ import annotations
@@ -26,28 +25,23 @@ from typing import Any, Callable
 
 import torch
 
-# Re-export SOL primitives so callers only import from _harness.
-from _solar import (  # noqa: F401
-    GB10Config, SOL, attn_sol, bandwidth_sol_gbs, bytes_per_elem,
-    gemm_sol, load_config, sol_score,
-)
-
-
 _BENCH_DIR = Path(__file__).parent
-_ENTRYPOINT = _BENCH_DIR / "bench_full.py"
+_ENTRYPOINT = _BENCH_DIR / "run_tiers.py"
 
 
 # ---------- statistics ----------
 
+
 @dataclass
 class Stats:
     """Latency stats over N timed iterations (all in ms)."""
+
     mean_ms: float
     median_ms: float
     p10_ms: float
     p90_ms: float
     stdev_ms: float
-    stdev_pct: float   # stdev_ms / mean_ms × 100 — easier to eyeball than raw stdev
+    stdev_pct: float  # stdev_ms / mean_ms × 100 — easier to eyeball than raw stdev
     min_ms: float
     max_ms: float
     n: int
@@ -70,21 +64,29 @@ class Stats:
             stdev = 0.0
         stdev_pct = (stdev / mean * 100.0) if mean > 0 else 0.0
         return cls(
-            mean_ms=mean, median_ms=median, p10_ms=p10, p90_ms=p90,
-            stdev_ms=stdev, stdev_pct=stdev_pct,
-            min_ms=min(samples_ms), max_ms=max(samples_ms), n=n,
+            mean_ms=mean,
+            median_ms=median,
+            p10_ms=p10,
+            p90_ms=p90,
+            stdev_ms=stdev,
+            stdev_pct=stdev_pct,
+            min_ms=min(samples_ms),
+            max_ms=max(samples_ms),
+            n=n,
         )
 
 
 # ---------- L2 cache flusher ----------
 
+
 class L2Flusher:
     """Cold-cache reset between iterations (SOL-ExecBench).
     GB10 L2 = 24 MB; 2× L2 = 48 MB is enough to evict prior footprint."""
+
     DEFAULT_MB = 48
 
     def __init__(self, size_mb: int = DEFAULT_MB, device: str = "cuda"):
-        n = size_mb * 1024 * 1024 // 4   # int32 elements
+        n = size_mb * 1024 * 1024 // 4  # int32 elements
         self.buf = torch.zeros(n, dtype=torch.int32, device=device)
         self.size_mb = size_mb
 
@@ -93,6 +95,7 @@ class L2Flusher:
 
 
 # ---------- CUDA event timing ----------
+
 
 def cuda_event_time(
     fn: Callable[[], Any],
@@ -119,24 +122,26 @@ def cuda_event_time(
         _ = fn()
         e.record()
         torch.cuda.synchronize()
-        samples.append(s.elapsed_time(e))   # ms
+        samples.append(s.elapsed_time(e))  # ms
 
     return Stats.from_samples(samples)
 
 
 # ---------- Result schema ----------
 
+
 @dataclass
 class Result:
     """Single test result. JSON-serializable; emitted under --json."""
-    name: str                      # test key, e.g. "fp16_gemm"
-    unit: str                      # "TFLOPs" or "GB/s"
-    measured: float                # throughput in `unit`
-    sol: float | None              # SOL bound, same unit; None if unmodeled
-    sol_score: float | None        # in [0, 1]; None if baseline/SOL unknown
-    sol_limit: str | None          # "compute" or "bandwidth"
+
+    name: str  # test key, e.g. "fp16_gemm"
+    unit: str  # "TFLOPs" or "GB/s"
+    measured: float  # throughput in `unit`
+    sol: float | None  # SOL bound, same unit; None if unmodeled
+    sol_score: float | None  # in [0, 1]; None if baseline/SOL unknown
+    sol_limit: str | None  # "compute" or "bandwidth"
     stats: Stats
-    correctness: str | None        # "PASS" / "FAIL" / None
+    correctness: str | None  # "PASS" / "FAIL" / None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -164,25 +169,30 @@ def emit_json(results: list[Result], path: Path | None = None) -> None:
 
 # ---------- Subprocess isolation ----------
 
+
 def run_isolated(test_name: str, env_overrides: dict[str, str] | None = None) -> dict:
     """Spawn one test in its own subprocess (SOL-ExecBench isolation).
-    Returns the parsed JSON document the child wrote to stdout.
-    Note: __file__ here is _harness.py; we invoke bench_full.py explicitly."""
+    Returns the parsed JSON document the child wrote to stdout."""
     env = dict(os.environ)
     if env_overrides:
         env.update(env_overrides)
     out = subprocess.check_output(
         [sys.executable, str(_ENTRYPOINT), "--only", test_name, "--json"],
-        env=env, stderr=subprocess.STDOUT,
+        env=env,
+        stderr=subprocess.STDOUT,
     )
     return json.loads(out)
 
 
 # ---------- Correctness gate helper ----------
 
+
 def allclose_gate(
-    actual: torch.Tensor, reference: torch.Tensor,
-    rtol: float = 1e-2, atol: float = 1e-2, name: str = "test",
+    actual: torch.Tensor,
+    reference: torch.Tensor,
+    rtol: float = 1e-2,
+    atol: float = 1e-2,
+    name: str = "test",
 ) -> str:
     """Return 'PASS' or 'FAIL: max|diff|=...'."""
     if torch.allclose(actual.float(), reference.float(), rtol=rtol, atol=atol):
@@ -196,7 +206,9 @@ def allclose_gate(
 if __name__ == "__main__":
     print("smoke test on CPU stats:")
     s = Stats.from_samples([10.0, 11.0, 9.5, 10.5, 10.2])
-    print(f"  mean={s.mean_ms:.2f} median={s.median_ms:.2f} stdev_pct={s.stdev_pct:.2f}")
+    print(
+        f"  mean={s.mean_ms:.2f} median={s.median_ms:.2f} stdev_pct={s.stdev_pct:.2f}"
+    )
     print("  expected mean ~10.24, stdev_pct ~5%")
 
     print("\nsmoke test cuda_event_time(no-op):")

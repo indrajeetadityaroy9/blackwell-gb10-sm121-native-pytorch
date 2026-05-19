@@ -1,20 +1,17 @@
 """
-Tier 3: Nsight Compute roofline via ncu_report Python API.
+NCU roofline profiler — importable from run_tiers.py and standalone CLI.
 
-Runs `ncu --set roofline` against bench_full.py for one test, parses the
-.ncu-rep, emits achieved_tflops, achieved_gbs, arith_intensity, and the
-sol_sm / sol_mem percentages from Nsight's roofline rule.
+Wraps `ncu --set roofline` with kernel-name filtering and a launch budget so
+profiling a model forward (~10k+ kernels, 10-30× NCU replay overhead per
+kernel) completes in minutes, not hours.
 
-Opt-in via BENCH_PROFILE=1 (profiling is 10-30× slower than normal runs).
+The filter regex restricts capture to compute/memory-dominant kernels (GEMM,
+MMA, attention, cutlass primitives) — small element-wise ops and CPU-side
+launches pass through at native speed. --launch-count caps the captured set
+so warm-iter measurements aren't displaced by warmup spam.
 
-Container prep (when BENCH_PROFILE=1):
-  apt-get install -y nsight-compute-2025.3.1
-  pip install ncu_report==2025.3.1
-  Run with --cap-add=SYS_ADMIN (NVIDIA HW counters; else ERR_NVGPUCTRPERM)
-
-Usage:
-  python bench/roofline.py fp16
-  python bench/roofline.py fp8 --json
+Parsing uses the ncu_report Python API (SQLite-backed .ncu-rep; stable
+across NCU minor versions) — not stdout regex.
 """
 
 from __future__ import annotations
@@ -25,87 +22,79 @@ import subprocess
 import sys
 from pathlib import Path
 
-import ncu_report
-
-# Make _harness importable
+# Make _harness importable from same dir.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from normalize import from_ncu
 
-# Metrics from ncu's roofline rule, verified on Blackwell sm_121 (Nsight 2026.1.0).
-# Per-instruction SASS counters are not in the roofline set on Blackwell — use
-# `--set full` separately if you need them.
+
+# Metrics from ncu's roofline rule, verified on Blackwell sm_121.
 METRICS = {
     "sol_sm": "sm__throughput.avg.pct_of_peak_sustained_elapsed",
     "sol_mem": "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed",
 }
 
+# Heavy-kernel filter. Restrict capture to compute and memory-dominant
+# kernels; pass-through for element-wise, copy, launch overhead, etc.
+_NAME_FILTER = r"regex:(?i)(gemm|mma|flash|sdpa|attention|cutlass)"
 
-def profile_one(test_key: str, rep_dir: Path) -> Path:
-    """Run ncu on bench_full.py --only test_key, return .ncu-rep path."""
-    rep_dir.mkdir(parents=True, exist_ok=True)
-    rep_base = rep_dir / f"{test_key}"
-    bench_full = Path(__file__).resolve().parent / "bench_full.py"
+# Launch budget — 50 captured kernels is enough to characterize the
+# attention + MLP layers of a single Llama-3-8B forward (~2 layers × 5
+# matmul-class kernels = 10 kernels per pass; budget covers 5+ passes).
+_LAUNCH_COUNT = 50
+
+
+def profile(command: list[str], rep_path: Path) -> list:
+    """Run command under `ncu --set roofline` with kernel filtering and
+    launch budget, then parse the resulting .ncu-rep via normalize.from_ncu.
+
+    Returns: list[Result] (defined in _harness.py).
+    """
+    rep_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ncu",
         "--set", "roofline",
+        "--filter-mode", "name",
+        "--name-filter", _NAME_FILTER,
+        "--launch-count", str(_LAUNCH_COUNT),
         "--target-processes", "all",
         "--force-overwrite",
-        "--export", str(rep_base),
-        sys.executable, str(bench_full),
-        "--only", test_key, "--no-isolate", "--json",
+        "--export", str(rep_path),
+        "--",
+        *command,
     ]
-    print(f"[roofline] profiling: {' '.join(cmd)}", file=sys.stderr)
+    print(f"[roofline] {' '.join(cmd)}", file=sys.stderr)
     subprocess.run(cmd, check=True)
-    return Path(str(rep_base) + ".ncu-rep")
+    return from_ncu(rep_path)
 
 
-def parse_report(rep_path: Path) -> dict:
-    """Extract roofline metrics from a .ncu-rep via ncu_report."""
-    ctx = ncu_report.load_report(str(rep_path))
-    # Pick the heaviest kernel (the GEMM/attn under test, not L2 flushes).
-    heaviest = None
-    heaviest_dur = -1.0
-    for ri in range(ctx.num_ranges()):
-        rng = ctx.range_by_idx(ri)
-        for ai in range(rng.num_actions()):
-            act = rng.action_by_idx(ai)
-            dur = act.metric_by_name("gpu__time_duration.sum").as_double()
-            if dur > heaviest_dur:
-                heaviest_dur = dur
-                heaviest = act
-
-    out: dict = {"kernel_name": heaviest.name(), "duration_s": heaviest_dur / 1e9}
-    for label, metric_name in METRICS.items():
-        out[label] = heaviest.metric_by_name(metric_name).as_double()
-    return out
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("test_key", help="bench test key, e.g. 'fp16' or 'fp8'")
+def _cli_main() -> int:
+    """Standalone CLI for ad-hoc debugging: profile an arbitrary command and
+    emit JSON. Not used by run_tiers.py (which calls profile() directly)."""
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap.add_argument("--rep", default="/tmp/roofline.ncu-rep",
+                    help="path to write .ncu-rep")
     ap.add_argument("--json", action="store_true",
-                    help="emit JSON instead of human-readable")
+                    help="emit JSON to stdout instead of human-readable")
+    ap.add_argument("command", nargs="+",
+                    help="command to profile (everything after the option flags)")
     args = ap.parse_args()
 
-    rep_dir = Path(__file__).resolve().parent / "logs" / "ncu"
-    rep_path = profile_one(args.test_key, rep_dir)
-    metrics = parse_report(rep_path)
-    metrics["test_key"] = args.test_key
-    metrics["rep_path"] = str(rep_path)
+    results = profile(args.command, Path(args.rep))
 
     if args.json:
-        print(json.dumps(metrics, indent=2))
+        from dataclasses import asdict
+        print(json.dumps(
+            {"results": [asdict(r) for r in results]},
+            indent=2, default=str,
+        ))
     else:
-        print(f"\nRoofline for {args.test_key} ({metrics['kernel_name']}):")
-        for k, v in metrics.items():
-            if k == "kernel_name":
-                continue
-            if isinstance(v, float):
-                print(f"  {k:30s}: {v:.3g}")
-            else:
-                print(f"  {k:30s}: {v}")
+        print(f"\nProfiled {len(results)} kernels:")
+        for r in results:
+            print(f"  {r.name[:60]:60s}  {r.measured:7.3f} ms  "
+                  f"sol_score={r.sol_score:.3f}  limit={r.sol_limit}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_cli_main())

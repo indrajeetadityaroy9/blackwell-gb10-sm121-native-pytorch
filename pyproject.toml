@@ -4,23 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dgx-spark-bench"
-version = "0.1.0"
-description = "DGX Spark (GB10 / sm_121) SOL-ExecBench harness"
+version = "0.2.0"
+description = "DGX Spark (GB10 / sm_121) reproducible bake-off: NCU roofline + optimum-benchmark + FlashAttention-4"
 requires-python = ">=3.11"
-# Exhaustive runtime deps for bench/ on the host running run_bakeoff.sh.
-# Inside each docker container, additional installs happen (the source-built
-# torch wheel, distro-pinned cuDNN/cuSPARSELt, nsight-compute when profiling) —
-# those are handled by run_bakeoff.sh + build_*.sh, not by this file.
+# Single source of truth for container installs. The host does not install
+# these — bench/run_bakeoff.sh bind-mounts this file read-only and replays
+# the pins via `uv pip install --system` inside each docker container.
 dependencies = [
     "torch>=2.10",
-    "triton>=3.5",
+    "optimum-benchmark==0.6.0",
+    "flash-attn-4==4.0.0b13",
     "ncu-report==2025.3.1",
+    "transformers>=4.55,<5.0",
+    "accelerate>=1.0",
+    "bitsandbytes==0.49.2",
+    "triton>=3.6",
+    "nvidia-cutlass-dsl",
+    "hf-transfer",
 ]
-
-[project.optional-dependencies]
-# Tier 3 roofline profiling — opt-in; requires Nsight Compute 2025.3+ on the
-# host (apt: nsight-compute-2025.3.1).
-profile = ["ncu-report==2025.3.1"]
 
 [tool.setuptools]
 packages = []   # bench/ is run as scripts, not installed

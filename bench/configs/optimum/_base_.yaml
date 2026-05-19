@@ -1,0 +1,31 @@
+# Shared DGX-Spark overrides for every model config. Pulled in via
+# `defaults: [..., _base_, _self_]` in every recommended/ and wide/ YAML.
+#
+# Optimum-benchmark's upstream `_base_.yaml` is also pulled in (for hydra
+# dir layout); this file adds GB10-specific tracking + iteration overrides.
+
+# Increase metric coverage beyond the inference scenario defaults.
+scenario:
+  warmup_runs: 5         # default is 10; we don't need that many for GB10
+  iterations: 10
+  duration: 0            # rely on iterations, not wall-clock duration
+  memory: true
+  latency: true
+  energy: false          # no on-host energy probe on GB10 yet
+
+# DGX Spark has 1 GPU. Hardcode device selection so missing CUDA aborts the run.
+backend:
+  device: cuda
+  device_ids: 0
+
+# Process launcher with device-isolation to verify only one GPU is reachable.
+launcher:
+  device_isolation: true
+  device_isolation_action: error
+
+# Hydra: stable run-dir layout the harness can glob for benchmark_report.json.
+hydra:
+  run:
+    dir: /logs/optimum/${name}
+  job:
+    chdir: true
