@@ -1,14 +1,15 @@
 """
-Tier 2 — Triton autotuned matmul (TritonForge methodology, arXiv 2512.09196).
+Tier 2 — Triton autotuned matmul (TritonForge, arXiv 2512.09196) over
+LLM-derived GEMM shapes from tests_gemm_llm._gemm_shapes.
 
-Plain triton.autotune over the same 162-config search grid as TritonForge
-(no profiling feedback). Cache key=[M,N,K] so iters reuse the best config.
+triton.autotune over the 162-config TritonForge grid; key=[M,N,K] caches
+the best config per shape.
 
-Runs as a SECOND test alongside the fixed-tile `triton` test:
-  - `triton`           : compiler codegen quality (one fixed config)
-  - `triton_autotuned` : best Triton performance on this hardware
+Runs alongside the fixed-tile `triton` test:
+  triton            — codegen quality at one fixed config
+  triton_autotuned  — best Triton across all LLM shapes
 
-First-run autotune cost: ~5-10 min (162 compiles). Cache mounted per-container
+First-shape autotune cost: ~5-10 min (162 compiles). Cache mounted per container
 at bench/cache/triton/sm121/run{A,B,C}/ via run_bakeoff.sh.
 """
 
@@ -27,23 +28,20 @@ from _harness import (
     Result, allclose_gate, cuda_event_time, load_config,
 )
 from _solar import gemm_sol
+from tests_gemm_llm import _gemm_shapes
 
 
 DEVICE = "cuda"
 WARMUP = int(os.environ.get("BENCH_WARMUP", 5))
 ITERS = int(os.environ.get("BENCH_ITERS", 50))
-M_DEFAULT = int(os.environ.get("BENCH_M", 8192))
 
 
-def test_triton_autotuned() -> Result:
-    """TritonForge-style sweep over 162 configs:
-      BLOCK_M ∈ {64,128,256}, BLOCK_N ∈ {64,128,256}, BLOCK_K ∈ {32,64,128},
-      num_stages ∈ {2,3,4}, num_warps ∈ {4,8}.
-    GROUP_M=8 fixed (TritonForge recipe)."""
+def test_triton_autotuned() -> list[Result]:
+    """TritonForge sweep over 162 configs (BLOCK_M/N/K × num_stages × num_warps),
+    GROUP_M=8 fixed. Iterates the same LLM shapes as tests_gemm_llm; the autotune
+    cache keyed by [M,N,K] picks the best config per shape."""
     import triton
     import triton.language as tl
-    name = "triton_autotuned_matmul_8192_fp16"
-    M = N = K = M_DEFAULT
 
     configs = [
         triton.Config(
@@ -92,56 +90,62 @@ def test_triton_autotuned() -> Result:
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         tl.store(c_ptrs, c, mask=c_mask)
 
-    a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
-    b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
-    c = torch.empty(M, N, device=DEVICE, dtype=torch.float16)
-
-    def run() -> None:
-        # Under autotune, the grid lambda receives the chosen config via META.
-        grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
-        )
-        matmul_kernel[grid](
-            a, b, c, M, N, K,
-            a.stride(0), a.stride(1),
-            b.stride(0), b.stride(1),
-            c.stride(0), c.stride(1),
-        )
-
-    # First call triggers autotune (slow); pre-run outside the timing window.
-    run()
-    torch.cuda.synchronize()
-
-    # Correctness gate vs torch fp16 matmul reference
-    ref = a @ b
-    correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2)
-
-    # Time it — cache hits the autotuned best config
-    stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
-
     cfg = load_config()
-    flops_per_call = 2.0 * M * N * K
-    median_s = stats.median_ms / 1000.0
-    tflops = flops_per_call / median_s / 1e12
-    sol = gemm_sol(M, N, K, "fp16", cfg)
+    out: list[Result] = []
+    for label, M, N, K in _gemm_shapes():
+        a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
+        b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
+        c = torch.empty(M, N, device=DEVICE, dtype=torch.float16)
 
-    # Record chosen config in extra payload (shown in SUMMARY)
-    cached = matmul_kernel.cache[(M, N, K)]
-    chosen = {"BLOCK_M": cached.kwargs["BLOCK_M"],
-              "BLOCK_N": cached.kwargs["BLOCK_N"],
-              "BLOCK_K": cached.kwargs["BLOCK_K"],
-              "num_stages": cached.num_stages,
-              "num_warps": cached.num_warps}
+        def run() -> None:
+            # Under autotune, the grid lambda receives the chosen config via META.
+            grid = lambda META: (
+                triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
+            )
+            matmul_kernel[grid](
+                a, b, c, M, N, K,
+                a.stride(0), a.stride(1),
+                b.stride(0), b.stride(1),
+                c.stride(0), c.stride(1),
+            )
 
-    return Result(
-        name=name, unit="TFLOPs", measured=tflops,
-        sol=sol.sol_tflops, sol_score=None, sol_limit=sol.limit,
-        stats=stats, correctness=correctness,
-        extra={"flops": flops_per_call, "configs_searched": len(configs),
-               "best_config": chosen},
-    )
+        # First call triggers autotune (slow); pre-run outside the timing window.
+        run()
+        torch.cuda.synchronize()
+
+        # Correctness gate vs torch fp16 matmul reference
+        ref = a @ b
+        correctness = allclose_gate(c, ref, rtol=1e-2, atol=1e-2)
+
+        # Time it — cache hits the autotuned best config
+        stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
+
+        flops_per_call = 2.0 * M * N * K
+        median_s = stats.median_ms / 1000.0
+        tflops = flops_per_call / median_s / 1e12
+        sol = gemm_sol(M, N, K, "fp16", cfg)
+
+        # Record chosen config in extra payload (shown in SUMMARY)
+        cached = matmul_kernel.cache[(M, N, K)]
+        chosen = {"BLOCK_M": cached.kwargs["BLOCK_M"],
+                  "BLOCK_N": cached.kwargs["BLOCK_N"],
+                  "BLOCK_K": cached.kwargs["BLOCK_K"],
+                  "num_stages": cached.num_stages,
+                  "num_warps": cached.num_warps}
+
+        out.append(Result(
+            name=f"triton_autotuned_{label}_M{M}_N{N}_K{K}",
+            unit="TFLOPs", measured=tflops,
+            sol=sol.sol_tflops, sol_score=None, sol_limit=sol.limit,
+            stats=stats, correctness=correctness,
+            extra={"flops": flops_per_call, "configs_searched": len(configs),
+                   "best_config": chosen, "M": M, "N": N, "K": K},
+        ))
+        del a, b, c
+        torch.cuda.empty_cache()
+    return out
 
 
-TESTS: dict[str, Callable[[], Result]] = {
+TESTS: dict[str, Callable[[], list[Result]]] = {
     "triton_autotuned": test_triton_autotuned,
 }

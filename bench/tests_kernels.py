@@ -1,13 +1,12 @@
 """
-Tier 2 — additional kernel tests beyond the original 6 GEMM/attention benchmarks.
-All use the SOL-ExecBench harness from _harness.py.
+Tier 2 — single-shape bandwidth-bound kernels.
+Attention bwd: tests_attn_fa4.py. GEMMs: tests_gemm_llm.py.
 
-  attn_bwd       SDPA-flash backward (5·B·H·S²·D causal)
-  rmsnorm        F.rms_norm (bandwidth-bound)
+  rmsnorm        F.rms_norm
   softmax        F.softmax over [B, H, S, S]
   cross_entropy  F.cross_entropy over [N, V=128k]
 
-Each test returns a Result; merged into bench_full.py ALL_TESTS.
+Each test returns a Result; bench_full.py wraps in [Result].
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import torch.nn.functional as F
 
 from _harness import (
     Result, allclose_gate, cuda_event_time, bandwidth_sol_gbs,
-    attn_sol, load_config,
+    load_config,
 )
 
 
@@ -56,41 +55,6 @@ def _bandwidth_result(name: str, fn: Callable, *, bytes_moved: float,
         sol=sol, sol_score=None, sol_limit="bandwidth",
         stats=stats, correctness=correctness,
         extra={"bytes_moved": bytes_moved, **(extra or {})},
-    )
-
-
-# -------------------- FlashAttention backward --------------------
-
-def test_attn_bwd() -> Result:
-    """SDPA-flash causal backward.
-    FLOPs = 5·B·H·S²·D (forward 2 + backward 3 GEMM-equivalents, both causally halved)."""
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-    B, H, S, D = 4, 32, 4096, 128
-    name = f"sdpa_flash_bwd_B{B}H{H}S{S}D{D}_causal"
-
-    # SDPA layout: (B, H, S, D)
-    q = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float16, requires_grad=True)
-    k = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float16, requires_grad=True)
-    v = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float16, requires_grad=True)
-
-    def run() -> None:
-        for t in (q, k, v):
-            t.grad = None
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        out.sum().backward()
-
-    stats = cuda_event_time(run, warmup=WARMUP, iters=ITERS)
-    flops_per_call = 5.0 * B * H * S * S * D  # 2 fwd + 3 bwd, causally halved
-    median_s = stats.median_ms / 1000.0
-    tflops = flops_per_call / median_s / 1e12
-    sol = attn_sol(B, H, S, D, "fp16", _cfg(), causal=True, backward=True)
-    return Result(
-        name=name, unit="TFLOPs", measured=tflops,
-        sol=sol.sol_tflops, sol_score=None, sol_limit=sol.limit,
-        stats=stats, correctness=None,
-        extra={"flops": flops_per_call, "B": B, "H": H, "S": S, "D": D,
-               "causal": True, "backward": True, "kernel": "sdpa_flash"},
     )
 
 
@@ -154,9 +118,8 @@ def test_cross_entropy() -> Result:
                               extra={"N": N_, "V": V_, "dtype": "fp32"})
 
 
-# test_key → callable, merged into bench_full.py ALL_TESTS
+# test_key → callable, merged into bench_full.py ALL_TESTS.
 TESTS: dict[str, Callable[[], Result]] = {
-    "attn_bwd": test_attn_bwd,
     "rmsnorm": test_rmsnorm,
     "softmax": test_softmax,
     "cross_entropy": test_cross_entropy,

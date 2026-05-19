@@ -1,35 +1,32 @@
 """
-DGX Spark bake-off benchmark — six Blackwell-class tests under SOL-ExecBench
-methodology (arXiv 2603.19173).
+DGX Spark bake-off benchmark — SOL-ExecBench methodology (arXiv 2603.19173).
 
-Tests:
-  1. FP16 GEMM 8192^3                  (a @ b → cuBLAS)
-  2. FP8 GEMM 8192^3 (e4m3)            (torch._scaled_mm, use_fast_accum=True)
-  3. FP4 GEMM 8192^3 (NVFP4)           (torch._scaled_mm, 1x16 / e4m3fn scales)
-  4. cuSPARSELt 2:4 sparse mm 8192^3   (to_sparse_semi_structured + F.linear)
-  5. Triton matmul 8192^3 (FP16)       (fixed-tile @triton.jit)
-  6. flash-attention forward           (flash_attn_func or torch SDPA-flash)
+Test catalogue (each TESTS entry returns list[Result]):
+  Tier 1 single-shape (codegen / reference): sparse, triton
+  Tier 2 single-shape bandwidth-bound:        rmsnorm, softmax, cross_entropy
+  Tier 2 Triton autotune across LLM shapes:   triton_autotuned
+  Tier 2-revised LLM-config GEMM sweep:       gemm_fp16_llm, gemm_fp8_llm, gemm_fp4_llm
+  Tier 2-revised FA-4 attention grid:         attn_fa4_fwd, attn_fa4_bwd
 
 Methodology:
-  - CUDA event timing via bench._harness (kernel-only)
-  - L2 flush per iter (48 MB buffer for GB10's 24 MB L2)
-  - 5 warmup + 50 timed iters (overridable via BENCH_ITERS / BENCH_WARMUP)
-  - Per-test correctness gate at M=1024 vs fp32 reference
-  - SOL Score from bench/sol_config.toml
+  - CUDA event timing via bench._harness (kernel-only, cold L2)
+  - 5 warmup + 50 timed iters per shape (BENCH_ITERS / BENCH_WARMUP)
+  - SOL Score per shape from bench/sol_config.toml
+  - Subprocess isolation per ALL_TESTS entry (SOL-ExecBench requirement)
 
-All listed features are required; missing ones fail loudly at import or call time.
+All listed features are required; missing ones fail loudly at import / call time.
 
 CLI:
-  bench_full.py                       # all tests, human-readable
-  bench_full.py --only fp16,fp8       # subset
-  bench_full.py --only fp16 --json    # single test → JSON to stdout
-  bench_full.py --json                # all tests → JSON to stdout
+  bench_full.py                            # all tests, human-readable
+  bench_full.py --only gemm_fp16_llm       # one test (which may yield many shapes)
+  bench_full.py --only attn_fa4_fwd --json # JSON to stdout
+  bench_full.py --json                     # all tests, JSON to stdout
 
 Env (CLI takes precedence):
-  BENCH_M=8192       GEMM dim (M = N = K)
-  BENCH_ITERS=50     timed iters per test
-  BENCH_WARMUP=5     warmup iters
-  BENCH_ONLY=fp4     same as --only
+  BENCH_M=8192       GEMM dim for the single-shape sparse + triton tests
+  BENCH_ITERS=50     timed iters per shape
+  BENCH_WARMUP=5     warmup iters per shape
+  BENCH_ONLY=...     same as --only
 """
 
 from __future__ import annotations
@@ -46,8 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 
 from _harness import (
-    Result, Stats, allclose_gate, cuda_event_time, emit_json, run_isolated,
-    bandwidth_sol_gbs, attn_sol, gemm_sol, load_config, sol_score,
+    Result, Stats, allclose_gate, cuda_event_time, emit_json,
+    gemm_sol, load_config,
 )
 import json
 import subprocess
@@ -90,87 +87,10 @@ def _gemm_result(name: str, fn: Callable, *, M_: int, N_: int, K_: int,
     )
 
 
-def _attn_result(name: str, fn: Callable, *, B: int, H: int, S: int, D: int,
-                 dtype: str = "fp16", causal: bool = True) -> Result:
-    """Time an attention kernel; SOL via attn_sol."""
-    stats = cuda_event_time(fn, warmup=WARMUP, iters=ITERS)
-    flops_per_call = (2.0 if causal else 4.0) * B * H * S * S * D
-    median_s = stats.median_ms / 1000.0
-    tflops = flops_per_call / median_s / 1e12
-    sol = attn_sol(B, H, S, D, dtype, CFG, causal=causal)
-    return Result(
-        name=name, unit="TFLOPs", measured=tflops,
-        sol=sol.sol_tflops, sol_score=None,
-        sol_limit=sol.limit, stats=stats,
-        correctness=None,
-        extra={"flops": flops_per_call, "B": B, "H": H, "S": S, "D": D, "causal": causal},
-    )
-
-
-# ---------- correctness gates ----------
-
-def _correctness_fp16_gemm(M_=1024) -> str:
-    a = torch.randn(M_, M_, device=DEVICE, dtype=torch.float16)
-    b = torch.randn(M_, M_, device=DEVICE, dtype=torch.float16)
-    out = a @ b
-    ref = a.float() @ b.float()
-    return allclose_gate(out, ref, rtol=1e-2, atol=1e-2, name="fp16_gemm")
-
-
-def _correctness_fp8_gemm(M_=1024) -> str:
-    a32 = torch.randn(M_, M_, device=DEVICE)
-    b32 = torch.randn(M_, M_, device=DEVICE)
-    a = a32.to(torch.float8_e4m3fn)
-    b = b32.to(torch.float8_e4m3fn).t().contiguous().t()
-    s = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
-    out = torch._scaled_mm(a, b, scale_a=s, scale_b=s,
-                           out_dtype=torch.bfloat16, use_fast_accum=True)
-    ref = a32 @ b32
-    return allclose_gate(out, ref, rtol=5e-2, atol=0.5, name="fp8_gemm")
-
-
-# ---------- 6 tests ----------
-
-def test_fp16() -> Result:
-    name = "fp16_gemm_8192"
-    correctness = _correctness_fp16_gemm()
-    a = torch.randn(M, K, device=DEVICE, dtype=torch.float16)
-    b = torch.randn(K, N, device=DEVICE, dtype=torch.float16)
-    return _gemm_result(name, lambda: a @ b, M_=M, N_=N, K_=K,
-                        dtype="fp16", correctness=correctness)
-
-
-def test_fp8() -> Result:
-    name = "fp8_gemm_8192_e4m3"
-    correctness = _correctness_fp8_gemm()
-    a = torch.randn(M, K, device=DEVICE).to(torch.float8_e4m3fn)
-    b = torch.randn(K, N, device=DEVICE).to(torch.float8_e4m3fn)
-    b = b.t().contiguous().t()  # FP8 GEMM needs col-major right operand
-    scale_a = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
-    scale_b = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
-    # use_fast_accum=True is the only path to Blackwell FP8 Tensor Core peak.
-    fn = lambda: torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b,
-                                   out_dtype=torch.bfloat16, use_fast_accum=True)
-    return _gemm_result(name, fn, M_=M, N_=N, K_=K,
-                        dtype="fp8", correctness=correctness, out_bpe=2.0)
-
-
-def test_fp4() -> Result:
-    name = "fp4_gemm_8192_nvfp4"
-    fp4 = torch.float4_e2m1fn_x2
-    e4m3 = torch.float8_e4m3fn
-    a = torch.randint(0, 256, (M, K // 2), device=DEVICE,
-                      dtype=torch.uint8).view(fp4)
-    b = (torch.randint(0, 256, (N, K // 2), device=DEVICE,
-                       dtype=torch.uint8).view(fp4).t())
-    scale_a = torch.ones(M, K // 16, device=DEVICE, dtype=e4m3)
-    scale_b = torch.ones(N, K // 16, device=DEVICE, dtype=e4m3)
-    # FP4 correctness gate skipped: 16 representable values × random uint8 input
-    # gives error magnitude O(√K·0.5) ≈ 45 at K=8192 — no usable tolerance.
-    fn = lambda: torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b,
-                                   out_dtype=torch.bfloat16)
-    return _gemm_result(name, fn, M_=M, N_=N, K_=K, dtype="fp4",
-                        correctness="SKIP: FP4 numerics not gate-able with random input")
+# ---------- tests ----------
+# Single-shape GEMMs and attention moved to tests_gemm_llm.py and
+# tests_attn_fa4.py. test_sparse_24 and test_triton_matmul stay single-shape:
+# cuSPARSELt + fixed-tile Triton are codegen references.
 
 
 def test_sparse_24() -> Result:
@@ -258,22 +178,6 @@ def test_triton_matmul() -> Result:
                         dtype="fp16", correctness=correctness)
 
 
-def test_flash_attn() -> Result:
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-    B, H, T, D = 4, 32, 4096, 128
-    name = f"sdpa_flash_fwd_B{B}H{H}T{T}D{D}_causal"
-    q = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
-    k = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
-    v = torch.randn(B, H, T, D, device=DEVICE, dtype=torch.float16)
-
-    def run() -> torch.Tensor:
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            return torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=True)
-
-    return _attn_result(name, run, B=B, H=H, S=T, D=D, dtype="fp16", causal=True)
-
-
 # ---------- env_info (human output) ----------
 
 def env_info() -> dict:
@@ -301,22 +205,26 @@ def print_env_info(info: dict) -> None:
 
 # ---------- main ----------
 
-ALL_TESTS: dict[str, Callable[[], Result]] = {
-    "fp16": test_fp16,
-    "fp8": test_fp8,
-    "fp4": test_fp4,
-    "sparse": test_sparse_24,
-    "triton": test_triton_matmul,
-    "attn": test_flash_attn,
+ALL_TESTS: dict[str, Callable[[], list[Result]]] = {
+    "sparse":             lambda: [test_sparse_24()],
+    "triton":             lambda: [test_triton_matmul()],
 }
 
-# Tier 2: attn_bwd, rmsnorm, softmax, cross_entropy
-from tests_kernels import TESTS as _TIER2_TESTS  # noqa: E402
-ALL_TESTS.update(_TIER2_TESTS)
+# Tier 2: bandwidth-bound singletons — wrapped to list[Result]
+from tests_kernels import TESTS as _TIER2_TESTS
+ALL_TESTS.update({k: (lambda fn=fn: [fn()]) for k, fn in _TIER2_TESTS.items()})
 
-# Tier 2: Triton autotune sweep
-from tests_triton_autotune import TESTS as _TIER2_TRITON_TESTS  # noqa: E402
+# Tier 2: Triton autotune sweep over LLM GEMM shapes
+from tests_triton_autotune import TESTS as _TIER2_TRITON_TESTS
 ALL_TESTS.update(_TIER2_TRITON_TESTS)
+
+# Tier 2-revised: LLM-config GEMMs (fp16/fp8/fp4)
+from tests_gemm_llm import TESTS as _GEMM_LLM_TESTS
+ALL_TESTS.update(_GEMM_LLM_TESTS)
+
+# Tier 2-revised: FA-4 attention grid (fwd + bwd)
+from tests_attn_fa4 import TESTS as _ATTN_FA4_TESTS
+ALL_TESTS.update(_ATTN_FA4_TESTS)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -391,10 +299,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(_human_row(r))
     else:
         for key, fn in selected:
-            r = fn()
-            results.append(r)
-            if not args.json:
-                print(_human_row(r))
+            for r in fn():
+                results.append(r)
+                if not args.json:
+                    print(_human_row(r))
             torch.cuda.empty_cache()
 
     if args.json:

@@ -20,7 +20,7 @@ from pathlib import Path
 # Make _harness importable from both host and container.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _harness import Result, Stats  # noqa: E402
+from _harness import Result, Stats
 
 REPO = Path(__file__).resolve().parent.parent.parent
 VOLUME = "dgx-spark-build-strict"

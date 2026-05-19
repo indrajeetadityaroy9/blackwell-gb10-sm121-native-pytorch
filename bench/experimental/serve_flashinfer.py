@@ -28,7 +28,7 @@ from pathlib import Path
 # Make _harness importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _harness import Result, Stats   # noqa: E402
+from _harness import Result, Stats
 
 TRACE_DIR = Path(__file__).resolve().parent / "traces"
 
