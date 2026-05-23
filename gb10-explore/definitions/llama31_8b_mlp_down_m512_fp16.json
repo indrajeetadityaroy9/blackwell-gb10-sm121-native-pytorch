@@ -1,0 +1,50 @@
+{
+  "name": "llama31_8b_mlp_down_m512_fp16",
+  "op_type": "gemm",
+  "axes": {
+    "M": {
+      "type": "const",
+      "value": 512
+    },
+    "N": {
+      "type": "const",
+      "value": 4096
+    },
+    "K": {
+      "type": "const",
+      "value": 14336
+    }
+  },
+  "inputs": {
+    "A": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "float16"
+    },
+    "B": {
+      "shape": [
+        "K",
+        "N"
+      ],
+      "dtype": "float16"
+    }
+  },
+  "outputs": {
+    "C": {
+      "shape": [
+        "M",
+        "N"
+      ],
+      "dtype": "float16"
+    }
+  },
+  "reference": "import torch\ndef run(A, B):\n    return (A.float() @ B.float()).to(A.dtype)\n",
+  "validator_class": "deterministic",
+  "tags": [
+    "llama31_8b",
+    "mlp_down",
+    "fp16"
+  ]
+}

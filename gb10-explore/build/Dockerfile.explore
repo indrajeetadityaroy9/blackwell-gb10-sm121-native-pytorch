@@ -1,0 +1,30 @@
+# Agent + bench runner. Extends dgx-spark-bench-base:cuda13.2.
+# Build context: gb10-explore/  (NOT repo root)
+ARG BENCH_BASE=dgx-spark-bench-base:cuda13.2
+FROM ${BENCH_BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# python3-dev is required by Triton's runtime CC (compile_module_from_src needs Python.h).
+# bench-base ships triton>=3.6 but lacks python3-dev — without it Triton kernels fail to compile.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      ca-certificates curl jq python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Bump triton to 3.7.0 (verified working on sm_121a per spec §1) and add the agent deps.
+RUN uv pip install --system --no-cache \
+      "triton==3.7.0" "httpx" "openai>=1.30" "pydantic>=2"
+
+COPY pyproject.toml /opt/explore/
+COPY explore       /opt/explore/explore/
+COPY kernels       /opt/explore/kernels/
+COPY definitions   /opt/explore/definitions/
+
+RUN uv pip install --system --no-cache --no-deps -e /opt/explore
+
+ENV PYTHONUNBUFFERED=1
+ENV GB10_RUNS=/workspace/runs
+ENV GB10_DEFINITIONS=/opt/explore/definitions
+ENV GB10_TRACES=/workspace/traces
+
+CMD ["sleep", "infinity"]

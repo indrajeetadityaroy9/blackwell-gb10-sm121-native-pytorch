@@ -1,0 +1,50 @@
+{
+  "name": "llama31_8b_qkv_proj_m512_bf16",
+  "op_type": "gemm",
+  "axes": {
+    "M": {
+      "type": "const",
+      "value": 512
+    },
+    "N": {
+      "type": "const",
+      "value": 12288
+    },
+    "K": {
+      "type": "const",
+      "value": 4096
+    }
+  },
+  "inputs": {
+    "A": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "bfloat16"
+    },
+    "B": {
+      "shape": [
+        "K",
+        "N"
+      ],
+      "dtype": "bfloat16"
+    }
+  },
+  "outputs": {
+    "C": {
+      "shape": [
+        "M",
+        "N"
+      ],
+      "dtype": "bfloat16"
+    }
+  },
+  "reference": "import torch\ndef run(A, B):\n    return (A.float() @ B.float()).to(A.dtype)\n",
+  "validator_class": "deterministic",
+  "tags": [
+    "llama31_8b",
+    "qkv_proj",
+    "bf16"
+  ]
+}

@@ -1,76 +1,73 @@
 # Containerization
 
-All bench build and execution lives in Docker. The host runs only `docker`
-commands. This document describes the container topology, why each container
-exists, and the docker volumes that persist artifacts across runs.
+All bench build and execution lives in Docker. The host runs only `docker` commands.
 
 ## Container topology
 
 | Container | Image | Privileges | Purpose | Lifetime |
 |---|---|---|---|---|
-| `dgx-bench-clocklock` | `nvcr.io/nvidia/cuda:13.2.0-base-ubuntu24.04` | `--privileged --gpus all` | Holds NVML GPU clock lock at 2418 MHz for the entire bake-off | Spawned at start of `run_bakeoff.sh`; torn down by EXIT trap (catches Ctrl+C, crash, normal exit) |
-| `runA` (ephemeral) | `nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04` + apt `python3` | `--gpus all` | PyPI baseline (`torch==2.9.0+cu130 + triton`) | one-shot per bake-off |
-| `runB` (ephemeral) | `nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04` + apt `python3 cudnn9 cusparselt` | `--gpus all` | Source-built wheel from `dgx-spark-build-strict` volume | one-shot per bake-off |
-| `runC` (ephemeral) | `nvcr.io/nvidia/pytorch:26.04-py3` | `--gpus all` | NGC vendor reference | one-shot per bake-off |
-| `nvbench-build` (ephemeral, on demand) | `nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04` | `--gpus all` | Build nvbench shim once for sm_121; binary cached in `dgx-spark-build-strict` volume | one-shot, on first run |
-| `flashinfer-build` (ephemeral, on demand) | `nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04` | `--gpus all` | Source-build FlashInfer with `TORCH_CUDA_ARCH_LIST=12.1` (Tier 4) | one-shot, on demand |
-| `roofline` (ephemeral, opt-in via `BENCH_PROFILE=1`) | `nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04` (Nsight Compute 2026.1.0 pre-installed in `/usr/local/cuda/bin/ncu`) | `--gpus all --cap-add=SYS_ADMIN` (for HW counters) | Run `ncu --set roofline` against one chosen test | one-shot per profile run |
-| `mlperf` (ephemeral, Tier 4) | `ghcr.io/mlcommons/inference:5.1-dev` | `--gpus all --ipc=host --shm-size=8g` | MLPerf v5.1 llama3.1-8b reference runner | one-shot per Tier 4 run |
+| `dgx-bench-clocklock` | `nvcr.io/nvidia/cuda:13.2.0-base-ubuntu24.04` | `--privileged --gpus all` | Holds the NVML GPU clock lock at 2418 MHz for the entire bake-off | Spawned at start of `run_bakeoff.sh`; torn down by the EXIT/INT/TERM trap |
+| Run A (ephemeral) | `dgx-spark-bench-base:cuda13.2` | `--gpus all --cap-add=SYS_ADMIN` (for NCU HW counters) | PyPI `torch==2.10.0+cu130` baseline; torch installed via `uv pip install --no-deps --force-reinstall` at container start | one-shot per bake-off |
+| Run B (ephemeral) | `dgx-spark-bench-base:cuda13.2` | `--gpus all --cap-add=SYS_ADMIN` | Source-built wheel mounted read-only from `dgx-spark-build-strict`; installed via the same `--force-reinstall` pattern | one-shot per bake-off |
+| Run C (ephemeral) | `nvcr.io/nvidia/pytorch:26.04-py3` | `--gpus all --cap-add=SYS_ADMIN` | NGC vendor reference. In-line setup installs `nsight-compute-2026.1`, `uv`, `optimum-benchmark`, recent `transformers`, and applies the two GB10 compat patches from the bench-base Dockerfile | one-shot per bake-off |
+| `dgx-bench-clocklock-verify` (ephemeral, gate) | `nvcr.io/nvidia/cuda:13.2.0-base-ubuntu24.04` | `--privileged --gpus all` | Phase 0 gate (`verify_clocklock.sh`): confirms NVML `--lock-gpu-clocks` works on this GB10 | one-shot per verify run |
+| PyTorch source build (ephemeral) | `nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu24.04` | `--gpus all --ipc=host --shm-size=8g` | Clones and builds PyTorch 2.10.0 with `TORCH_CUDA_ARCH_LIST="12.1;12.1a"`; wheel deposited in `dgx-spark-build-strict` | one-shot, on first build |
+| HF prefetch (ephemeral) | `python:3.12-slim` | (no GPU) | Pulls model weights into `dgx-spark-hf-cache` via the host's `hf auth token` and `hf-transfer` | one-shot per prefetch |
 
 ## Why `--privileged` for the clock-lock container?
 
-Tested: `--cap-add=SYS_ADMIN` alone is **not sufficient** to call NVML
-`nvidia-smi --lock-gpu-clocks` from inside a container. The NVIDIA Container
-Toolkit gates clock-control NVML ops on full container privilege.
+`--cap-add=SYS_ADMIN` alone is **not** sufficient to call NVML `nvidia-smi --lock-gpu-clocks` from inside a container. The NVIDIA Container Toolkit gates clock-control NVML ops on full container privilege.
 
-We localize the privilege to a single short-lived controller container that
-runs only the lock/unlock commands. The bench containers themselves are
-unprivileged. This is documented as the security trade-off in the Risk Register.
+The privilege is localized to a single short-lived controller container that runs only the lock/unlock commands. The bench containers themselves stay unprivileged (only `--cap-add=SYS_ADMIN` for NCU's HW counters). The `EXIT/INT/TERM` trap in `run_bakeoff.sh` uses `docker exec` against the controller to issue the unlock, so a host-side Ctrl+C still propagates correctly.
 
-## Why is the GPU clock lock in a container, not on the host?
+Phase 0 (`bench/verify_clocklock.sh`) is the gate that confirms NVML lock works on this GB10: it locks at 2418 MHz, queries `clocks.sm`, validates within ±5%, then unlocks. Exits 0 (PASS) or 2 (FAIL).
 
-The plan is container-first by design. The host runs only `docker` commands;
-the actual NVML clock-lock call lives inside `dgx-bench-clocklock`. The trap
-in `run_bakeoff.sh` uses `docker exec` to issue the unlock, so a host-side
-Ctrl+C still propagates correctly.
+## Why the trap in `run_bakeoff.sh` omits `ERR`
 
-Phase 0 (`bench/verify_clocklock.sh`) is the gate that confirms NVML lock
-works on this GB10. Verified on this hardware: locked at 2418 MHz, driver
-reports 2411 MHz (0.3% within target). PASS.
+With `ERR` in the trap, the first failing `docker run` would fire the trap immediately and `exit "$rc"` would terminate the script — Runs B and C would never execute. Per-wheel independence is the whole point of the bake-off; the script captures `A_RC`/`B_RC`/`C_RC` and lets the next run proceed even if its predecessor fails.
 
 ## Docker volumes
 
 | Volume | Purpose | Created by |
 |---|---|---|
-| `dgx-spark-build-strict` | PyTorch wheel (from `build/source_build.sh`), nvbench binary (from `bench/nvbench_shim/build_nvbench.sh`), FlashInfer wheel (from `bench/experimental/build_flashinfer.sh`) | `build/source_build.sh` initially |
-| `mlperf-cache` | MLPerf v5.1 weights + dataset (~16 GB; Tier 4 only) | `bench/experimental/mlperf_llama31_8b.py` |
-| `bench/cache/triton/sm121/runA,runB,runC` (bind mounts) | Triton autotune cache, per-container | `run_bakeoff.sh` |
+| `dgx-spark-build-strict` | PyTorch source tree, ccache, and the source-built wheel (`/work/pytorch/dist/torch-*.whl`) | `build/source_build.sh` |
+| `dgx-spark-hf-cache` | HuggingFace model cache (Llama-3.1-8B and any other scenario models) | `bench/build/prefetch_hf_models.sh`; mounted into bench containers as `/hf-cache` |
+| `dgx-spark-uv-cache` | uv package cache, shared across runs | `bench/run_bakeoff.sh` |
+| `dgx-spark-apt-cache` | apt cache (Run C reinstalls `nsight-compute-2026.1` per run; this volume keeps the .deb cached) | `bench/run_bakeoff.sh` |
+| `dgx-spark-triton-cache-a` / `-b` / `-c` | Per-wheel Triton JIT cache | `bench/run_bakeoff.sh` |
+
+`bench/cleanup_volumes.sh` removes all seven (interactively unless `-y`/`--force`).
 
 ### Why per-container Triton cache?
 
-Triton's cache key includes `backend.hash()`, which encodes the GPU
-architecture (`sm_120` ≠ `sm_121`). Different containers with potentially
-different Triton versions also have different cache hashes. Cross-mounting
-would risk cache invalidation or incorrect lookups. Each container gets its
-own `cache/triton/sm121/run<X>/` subdir.
+Triton's cache key includes `backend.hash()`, which encodes the GPU architecture. Different wheels in different containers may also ship different Triton versions, with different cache hashes. Cross-mounting would risk cache invalidation or incorrect lookups. Each wheel gets its own `dgx-spark-triton-cache-<a|b|c>` volume mounted at `/root/.triton/cache`.
+
+## bench-base image (`dgx-spark-bench-base:cuda13.2`)
+
+Built once via `bench/build/build_bench_base.sh`; reused by Runs A and B. Layers (from `bench/build/Dockerfile.bench-base`):
+
+1. apt: `python3 python3-pip python3-venv ca-certificates curl libopenblas0 libnuma1 cudnn9-cuda-13-2 cusparselt-cuda-13 libcusparselt0-cuda-13 nsight-compute-2026.1`, plus removing `/usr/lib/python3.12/EXTERNALLY-MANAGED` (PEP 668 marker) so subsequent `uv pip install --system` calls don't need `--break-system-packages`.
+2. `uv 0.11.15` via pip.
+3. torch-independent python tools: `hf-transfer`, `ncu-report==2025.3.1`.
+4. torch-dependent overlay: `transformers>=4.55,<5.0`, `accelerate>=1.0`, `bitsandbytes==0.49.2`, `optimum-benchmark==0.6.0`, `triton>=3.6`. uv pulls full transitive deps; the resolver pulls a default torch from PyPI as a side effect — the per-wheel container then replaces it via `uv pip install --no-deps --force-reinstall <wheel>`.
+5. Two `sed`-applied GB10 compat patches to optimum-benchmark v0.6.0:
+   - `system_utils.get_gpu_vram_mb` — `pynvml.nvmlDeviceGetMemoryInfo` raises `NotSupported` on GB10 (Grace's unified LPDDR5X has no separate FB Memory exposed via NVML). Substitute `0`; only used for metadata.
+   - `backends/pytorch/backend.split_between_processes` — calls `torch.distributed.is_initialized()` unconditionally; the source-built wheel (Run B) is compiled with `USE_DISTRIBUTED=0`, removing that function. Replace with `getattr(torch.distributed, "is_initialized", lambda: False)()`.
+
+Run C applies the same two patches in-line at container start (the NGC image installs optimum-benchmark fresh per run).
 
 ## Build artifact provenance
 
 | Artifact | Built by | Stored in |
 |---|---|---|
-| `torch-2.10.0-*.whl` (sm_121 native) | `build/source_build.sh` | `dgx-spark-build-strict:/work/pytorch/dist/` |
-| `sm121_gemm` (nvbench shim binary) | `bench/nvbench_shim/build_nvbench.sh` | `dgx-spark-build-strict:/work/nvbench_shim/build/` |
-| `flashinfer-*.whl` (sm_121 native) | `bench/experimental/build_flashinfer.sh` | `dgx-spark-build-strict:/work/flashinfer/dist/` |
+| `torch-2.10.0-*.whl` (sm_121 / sm_121a native) | `build/source_build.sh` | `dgx-spark-build-strict:/work/pytorch/dist/` |
+| `dgx-spark-bench-base:cuda13.2` | `bench/build/build_bench_base.sh` | local docker image registry |
+| HF model weights | `bench/build/prefetch_hf_models.sh` | `dgx-spark-hf-cache:/` |
 
-All three are built inside containers, never on the host. Re-runs reuse the
-volume; only invalidate by deleting the volume (`docker volume rm dgx-spark-build-strict`).
+All three are built inside containers, never on the host. Re-runs reuse the volumes/images; invalidate by `docker volume rm` / `docker rmi`.
 
 ## Permission notes
 
-- `docker.sock` is owned `root:docker 660`. User must be in the `docker` group
-  (`getent group docker`). New shell sessions activate the group automatically;
-  this session uses `sg docker -c` because the membership postdates the shell.
-- HuggingFace token at `~/.cache/huggingface/token` is mounted read-only into
-  the MLPerf container (`-v ~/.cache/huggingface:/root/.cache/huggingface:ro`).
-  The script also extracts it into `HF_TOKEN=$(cat ~/.cache/huggingface/token)`
-  for compatibility with libraries that check the env var.
+- `docker.sock` is owned `root:docker 660`. User must be in the `docker` group (`getent group docker`).
+- The HuggingFace token is read on the host via `hf auth token` and passed into containers as the `HF_TOKEN` env var; no token files are mounted into bench containers.
+- NGC API key is required on the host (`docker login nvcr.io`) for Run C to pull `nvcr.io/nvidia/pytorch:26.04-py3`.

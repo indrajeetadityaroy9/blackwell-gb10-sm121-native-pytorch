@@ -1,0 +1,68 @@
+{
+  "name": "llama31_8b_attn_out_m512_fp4",
+  "op_type": "gemm",
+  "axes": {
+    "M": {
+      "type": "const",
+      "value": 512
+    },
+    "N": {
+      "type": "const",
+      "value": 4096
+    },
+    "K": {
+      "type": "const",
+      "value": 4096
+    },
+    "K_div32": {
+      "type": "const",
+      "value": 128
+    }
+  },
+  "inputs": {
+    "A": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "float4_e2m1"
+    },
+    "B": {
+      "shape": [
+        "K",
+        "N"
+      ],
+      "dtype": "float4_e2m1"
+    },
+    "scale_a": {
+      "shape": [
+        "M",
+        "K_div32"
+      ],
+      "dtype": "int8"
+    },
+    "scale_b": {
+      "shape": [
+        "K_div32",
+        "N"
+      ],
+      "dtype": "int8"
+    }
+  },
+  "outputs": {
+    "C": {
+      "shape": [
+        "M",
+        "N"
+      ],
+      "dtype": "bfloat16"
+    }
+  },
+  "reference": "import torch\ndef run(A, B, scale_a, scale_b):\n    # FP4 mxfp4: reference is the same scaled_mm; matched_ratio_loose absorbs noise.\n    return torch._scaled_mm(A, B, scale_a=scale_a, scale_b=scale_b,\n                            out_dtype=torch.bfloat16, use_fast_accum=False)\n",
+  "validator_class": "matched_ratio_loose",
+  "tags": [
+    "llama31_8b",
+    "attn_out",
+    "fp4"
+  ]
+}

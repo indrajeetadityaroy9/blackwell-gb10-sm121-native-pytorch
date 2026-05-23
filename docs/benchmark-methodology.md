@@ -1,193 +1,113 @@
-# Benchmark Methodology — `bench/bench_full.py`
+# Benchmark Methodology
 
-A 6-test PyTorch benchmark suite for DGX Spark (Blackwell GB10, sm_121). Each test exercises one capability claimed by Blackwell's spec sheet and reports numbers comparable to public benchmarks at the same shape.
+The bake-off pipeline driven by `bench/run_bakeoff.sh` exercises three measurement tiers inside each wheel's container. The host runs only `docker` commands. See [containerization.md](containerization.md) for the container topology.
 
-## Tests
+## Entry points
 
-| # | Test | Workload | What it measures |
-|---|---|---|---|
-| 1 | FP16 GEMM 8192³ | `a @ b`, fp16 inputs | cuBLAS dispatch quality for Blackwell's primary matmul path |
-| 2 | FP8 GEMM 8192³ (e4m3) | `torch._scaled_mm` with `use_fast_accum=True` | Blackwell 5th-gen Tensor Cores' FP8 throughput (theoretical 2× FP16) |
-| 3 | FP4 GEMM 8192³ (mxfp4) | `torch._scaled_mm` with `float4_e2m1fn_x2` + per-block `float8_e8m0fnu` scales | Blackwell FP4 Tensor Cores (best-effort; API not stable across torch versions) |
-| 4 | cuSPARSELt 2:4 sparse mm | `to_sparse_semi_structured` + `F.linear` | Hardware-accelerated 2:4 structured sparsity (Blackwell theoretical 2× dense) |
-| 5 | Triton matmul 8192³ FP16 | Hand-written tiled `@triton.jit` kernel | Triton compiler's sm_121 PTXAS codegen quality |
-| 6 | flash-attention forward | `flash_attn_func` (preferred) or `torch SDPA-flash` (fallback) | Attention kernel quality; B=4 H=32 T=4096 D=128 causal |
+| File | Role |
+|---|---|
+| `bench/run_bakeoff.sh` | Host-side driver. Spawns the clock-lock sidecar, runs A/B/C in sequence, calls `_summarize.py`. |
+| `bench/run_tiers.py` | In-container orchestrator. Runs the three tiers in deterministic order; emits one JSON document to stdout. |
+| `bench/_harness.py` | Shared measurement primitives: `Stats`, `cuda_event_time`, `Result`, `emit_json`. |
+| `bench/kernel_bench.py` | Tier 2 kernel-level GEMM bench (per-dtype subprocess). |
+| `bench/roofline.py` | Tier 3 NCU profiler wrapper. |
+| `bench/normalize.py` | Schema adapters: `from_optimum`, `from_kernel`, `from_ncu` → `list[Result]`. |
+| `bench/_summarize.py` | Aggregates `runA/B/C.json` → `SUMMARY.txt`. |
 
-## Common harness
+## Methodology rigor (applied to every tier)
 
-Each test uses the same `bench()` function:
+- **Clock lock via privileged sidecar** (`bench/_clocklock.sh`, gated by `bench/verify_clocklock.sh`). `nvidia-smi --lock-gpu-clocks=2418,2418` is issued from inside a single `--privileged` controller container (`dgx-bench-clocklock`); bench containers themselves stay unprivileged (only `--cap-add=SYS_ADMIN` for NCU's HW counters). Trap-based unlock on EXIT/INT/TERM.
+- **L2 cache flush before every iteration** — `_harness.cuda_event_time` zeroes a 48 MB int32 buffer (2× GB10's 24 MB L2) between samples for cold-cache measurement.
+- **CUDA event timing** — kernel-only via `torch.cuda.Event`, eliminating Python-overhead bias. Default 5 warmup + 50 timed iters.
+- **Statistical reporting** — `Stats.from_samples` produces mean / median / p10 / p90 / stdev / stdev_pct per measurement via stdlib `statistics`.
+- **Per-wheel JSON output** — `_harness.emit_json` stamps each report with `torch_version`, `cuda_version`, `device_name`, `arch_list`; consumed by `_summarize.py`.
 
-```python
-for _ in range(WARMUP):       # 10 iters, discarded
-    fn()
-torch.cuda.synchronize()
-start = time.perf_counter()
-iters = 0
-while time.perf_counter() - start < TARGET_S:   # 15 seconds default
-    fn()
-    iters += 1
-torch.cuda.synchronize()
-elapsed = time.perf_counter() - start
-tflops = (flops_per_call * iters / elapsed) / 1e12
+## Tier 1 — optimum-benchmark wall-clock (bandwidth-bound regime)
+
+`run_tiers.run_optimum_tier` iterates each YAML in `bench/configs/optimum/${BENCH_OPTIMUM_SCENARIO}/` (default `recommended/`) and invokes `optimum-benchmark --config-dir <dir> --config-name <stem>`. Underscore-prefixed names (Hydra inheritance bases like `_base_.yaml`) are skipped; symlink targets shared between `recommended/` and `wide/` are deduped against their realpath so the same config is not run twice.
+
+The configs pin the GB10-specific runtime overrides:
+
+- `scenario.warmup_runs=5`, `scenario.iterations=10`, `duration=0` (count-based, not wall-clock).
+- `backend.device=cuda`, `device_ids=0` (DGX Spark is single-GPU).
+- `launcher.device_isolation=true`, `device_isolation_action=error` — missing CUDA aborts the run.
+- `hydra.run.dir=/logs/optimum/${name}` for stable globbing by `from_optimum`.
+- `OVERRIDE_BENCHMARKS=1` — forces optimum-benchmark to re-run when the run dir already exists from a previous wheel in the same `/logs` volume.
+
+The default `recommended/llama3_8b_bf16.yaml` runs Llama-3.1-8B BF16 at batch=1, seq_len=512, 128 new tokens (prefill + decode + per-token latency).
+
+After each run, `from_optimum(run_dir)` reads `benchmark_report.json` and produces one `Result(unit="ms")` per operation; throughput (for ops that report it — generate/forward/decode) is folded into `extra`.
+
+## Tier 2 — kernel-level GEMM (compute-bound regime)
+
+`run_tiers.run_kernel_tier` invokes `bench/kernel_bench.py` once per dtype (`bf16`, `fp16`, `fp8`, `fp4`) as an isolated subprocess. Per-dtype isolation is necessary because cuBLAS Lt's heuristic table on sm_121 is incomplete for FP8/FP4 and raises `CUBLAS_STATUS_NOT_INITIALIZED` mid-process — without subprocess isolation, an FP8 failure would lose the BF16/FP16 results in the same Python process. Per-dtype failures are recorded as zero-length result lists; the wheel still produces JSON for the dtypes that succeeded.
+
+Shapes are the four Llama-3.1-8B projections at M=512 (small prefill):
+
+| Label | (M, N, K) |
+|---|---|
+| `qkv_proj` | (512, 12288, 4096) |
+| `attn_out` | (512, 4096, 4096) |
+| `mlp_up` | (512, 14336, 4096) |
+| `mlp_down` | (512, 4096, 14336) |
+
+At M=512 these are above GB10's ~330 FLOPs/byte arithmetic-intensity crossover and therefore compute-bound — the regime where native sm_121 cubins are expected to differentiate from the PTX-JIT path. Decode-shape (M=1) matmuls are bandwidth-bound and all three wheels saturate the same 273 GB/s LPDDR5X ceiling, so they are not separately measured here.
+
+Per-dtype kernels:
+
+- `bf16` / `fp16` — `torch.matmul (a @ b)`.
+- `fp8` — `torch._scaled_mm` with `float8_e4m3fn`, scalar scales, `use_fast_accum=True`, BF16 output.
+- `fp4` — `torch._scaled_mm` with `float4_e2m1fn_x2` and `float8_e4m3fn` block scales at 1×16 (mxfp4), BF16 output. The fp4 storage is built via random `uint8 → view(float4_e2m1fn_x2)` because `torch.randn(...).to(float4_e2m1fn_x2)` raises in torch 2.10+; for timing the exact values don't matter.
+
+FLOPs are counted with the standard `2·M·N·K` convention; throughput is `flops / median_ms / 1e9` TFLOPs.
+
+## Tier 3 — NCU roofline
+
+`run_tiers.run_roofline_tier` profiles the BF16 `kernel_bench.py` under Nsight Compute. BF16 is the most stable codepath across all three wheels (FP8/FP4 may skip on some).
+
+`bench/roofline.py` runs:
+
+```
+ncu --set roofline \
+    --kernel-name regex:(?i)(gemm|mma|flash|sdpa|attention|cutlass) \
+    --launch-count 200 \
+    --target-processes all \
+    --force-overwrite \
+    --export <rep_path> \
+    -- <command>
 ```
 
-Key properties:
+The 200-launch budget captures ~3–5 launches per unique GEMM kernel (4 shapes × multiple iters) without exploding NCU's 10–30× replay overhead.
 
-- **Wall-clock timing.** Includes Python overhead per iteration but at 8192³ matmul (~30 ms/iter for FP16), kernel time dominates by ~99%.
-- **No `synchronize()` between iterations.** CUDA queue fills up; PyTorch matmuls are async; the synchronize at the end yields the true sustained GPU throughput.
-- **Each test sets up fresh tensors**; no state leakage across tests.
-- **Graceful skip on any failure** (missing dtype, missing package, runtime error). The remaining tests continue.
+`from_ncu(rep_path)` parses the `.ncu-rep` via the `ncu_report` Python API and emits one `Result` per profiled kernel:
 
-## FLOPs counting conventions
+- `measured` = `gpu__time_duration.sum` in ms
+- `sol` = back-derived ideal duration (`duration × achieved_pct / 100`) where `achieved_pct = max(sol_sm_pct, sol_mem_pct)`
+- `extra` records `achieved_pct`, `sol_sm_pct`, `sol_mem_pct`, and a `limit ∈ {compute, bandwidth}` classification
 
-| Test | Formula | Note |
-|---|---|---|
-| FP16/FP8/FP4 GEMM | `2 * M * N * K` | Standard GEMM convention; 2 ops per multiply-accumulate |
-| cuSPARSELt 2:4 | `2 * M * N * K` | Reports *effective* TFLOPs vs dense baseline. GPU actually performs ~M*N*K MACs (half) but reporting against dense convention is standard. |
-| flash-attention causal | `2 * B * H * T * T * D` | Full attention is `4 * B * H * T * T * D` (Q@K^T + attn@V), causal halves both → 2 |
+This is the only tier with a non-`None` SOL bound, so it is the only tier whose rows produce a numeric SOL Score column in `SUMMARY.txt`.
 
-## Methodological caveats and known limitations
+## Aggregation: SOL Score
 
-1. **Wall-clock vs CUDA event timing.** Our `bench()` uses `time.perf_counter()` around a synchronize-bracketed burn-in. This includes Python overhead per iteration, but at 8192³ matmul (~30 ms/iter for FP16) kernel time dominates by ~99%. CUDA-event timing (measuring only kernel time, excluding Python and launch overhead) typically reports lower TFLOPs than wall-clock, especially for short-iter benches; the *relative* ordering between A/B/C is robust within this methodology.
+`bench/_summarize.py` reads `runA/B/C.json`, groups results by stable `name` across wheels, and produces a SOL Score per (wheel, test) using Run A as baseline:
 
-2. **No GPU clock locking.** SOL-ExecBench (arXiv 2603.19173) recommends `nvidia-smi -lgc <freq>,<freq>` before benchmarking to eliminate ±10% throughput swing from thermal/power management. Our bench does not do this. The 60 s burn-in averages over most thermal transients.
+```
+Score(wheel, test) = clamp01( (measured − baseline) / (sol − baseline) )
+```
 
-3. **No L2 cache clearing between iterations.** SOL-ExecBench recommends flushing L2 between iters to measure cold-cache performance. Our sustained burn-in produces warm-cache numbers, which are typical for production workloads but overestimate vs. SOL-style measurement.
+The formula is sign-correct in both directions: TFLOPs (higher-is-better) yields positive / positive; latency-ms (lower-is-better) yields negative / negative.
 
-4. **No median + variance reporting.** Each test produces a single average TFLOPs over ~500 iterations. With ~500-sample averaging, variance is low (<2%) but not explicitly reported.
+- **Score = 0.0** → wheel matches PyPI baseline (no improvement)
+- **Score = 1.0** → wheel reaches the NCU-derived per-kernel ceiling
+- Tiers without a `sol` value (optimum, kernel) render '—' in the score column
 
-5. **Triton kernel uses fixed tile sizes** (128×256×64 with GROUP_M=8), not autotuned. TritonForge (arXiv 2512.09196) shows 1.76× average speedup from profiling-guided autotune over fixed configs. Our Triton number is "untuned Triton baseline", which is what we want for comparing compiler codegen, but not "best Triton can do."
+Rows where wheel coverage is incomplete (typically NCU kernel names that differ across wheels) are counted and reported as a skipped-row footnote rather than dropped silently.
 
-6. **No verification of numerical correctness.** Tests measure throughput, not accuracy. We trust torch's own correctness.
+## What this bench does not do
 
-## What this bench is not
-
-- It is not a comprehensive PyTorch benchmark (no convolutions, no LayerNorm, no end-to-end model timing).
-- It is not a Blackwell-peak benchmark (we don't hit Speed-of-Light; that requires TMEM + 2-CTA MMA + CuTe-DSL per FlashAttention-4).
-- It does not isolate hardware effects — driver state, container overhead, and kernel selection are not controlled.
-
-The bench is **right-sized for comparing PyTorch deployment paths on identical hardware** — which is the specific question this research asks.
-
----
-
-# 2026 SOTA upgrade — methodology refresh
-
-The original 6-test bench above is preserved as Tier 1's input. Layered onto
-that input is SOL-ExecBench methodology (arXiv 2603.19173) plus three new tiers
-of capability. All execution is containerized; the host runs only `docker`
-commands. See `docs/containerization.md` for topology and `docs/sol-score.md`
-for the SOL Score formula.
-
-## Tier 1 — Methodology rigor (replaces the old wall-clock harness)
-
-Every test in `bench/bench_full.py` now runs through `bench/_harness.py`:
-
-- **Clock lock via privileged controller container** (`bench/_clocklock.sh`,
-  Phase 0 gate `bench/verify_clocklock.sh`). `nvidia-smi --lock-gpu-clocks` at
-  2418 MHz from inside a `--privileged` container; bench containers stay
-  unprivileged. Trap-based unlock on EXIT/INT/TERM/ERR.
-  - **Resolves limitation 2** (no GPU clock locking). Verified ±0.3% on GB10.
-- **L2 cache flush before every iteration** (`L2Flusher`, 48 MB buffer = 2×
-  GB10's 24 MB L2). Cold-cache per iter, matching SOL-ExecBench convention.
-  - **Resolves limitation 3** (no L2 cache clearing).
-- **CUDA event timing** (`cuda_event_time`), not wall-clock. Kernel-only
-  measurement; eliminates Python overhead bias. Default 5 warmup + 50 timed
-  iters (configurable via `BENCH_ITERS`, `BENCH_WARMUP`).
-  - **Resolves limitation 1** (wall-clock vs CUDA event timing).
-- **Statistical reporting** — mean / median / p10 / p90 / stdev / stdev_pct
-  per test via stdlib `statistics`. Reported in `Result.stats`.
-  - **Resolves limitation 4** (no median + variance reporting).
-- **Subprocess isolation** — each test runs in its own Python process when
-  invoked through the multi-test orchestrator (SOL-ExecBench requirement;
-  ~5s per-test Python startup overhead accepted in exchange for reproducibility).
-- **Per-test correctness gates** at small M=1024 against fp32 reference:
-  FP16/BF16/Triton/Sparse (`rtol=1e-2 atol=1e-2`); FP8 (`rtol=5e-2 atol=0.5`);
-  FP4 gate skipped (16 representable values × random uint8 → error magnitude
-  O(√K·0.5) ≈ 45 at K=8192; meaningful tolerance unusable).
-  - **Resolves limitation 6** (no verification of numerical correctness).
-- **SOL Score per test** — analytical Speed-of-Light from `bench/_solar.py`
-  using GB10 specs in `bench/sol_config.toml`. See `docs/sol-score.md`.
-- **JSON output mode** (`bench_full.py --json`) for machine-readable
-  aggregation by `bench/_summarize.py`. Human-readable output preserved as
-  default for direct CLI use.
-
-Tier 1 output: `bench/logs/run{A,B,C}.json` + `bench/logs/SUMMARY.txt` with a
-3-way SOL Score table using Run A (PyPI) as baseline.
-
-## Tier 2 — New kernel coverage
-
-Four tests added in `bench/tests_kernels.py` and one in
-`bench/tests_triton_autotune.py`, integrated into `bench_full.py`'s `ALL_TESTS`:
-
-| Test key | Workload | Unit | SOL basis |
-|---|---|---|---|
-| `attn_bwd` | SDPA-flash causal backward (B=4 H=32 S=4096 D=128) | TFLOPs | 5·B·H·S²·D causal |
-| `rmsnorm` | `F.rms_norm` on `[8192, 8192]` fp16 | GB/s | bandwidth-bound |
-| `softmax` | `F.softmax` on `[2, 16, 4096, 4096]` fp16 | GB/s | bandwidth-bound |
-| `cross_entropy` | `F.cross_entropy` on `[8192, 128k]` fp32 | GB/s | bandwidth-bound |
-| `triton_autotuned` | TritonForge sweep (162 configs: BLOCK_M/N/K × num_stages × num_warps) | TFLOPs | FP16 peak |
-
-The existing fixed-tile `triton` test is retained alongside `triton_autotuned`
-— they measure different things (compiler codegen quality vs best-Triton).
-Both SKIP on Run A (PyPI triton 3.5.0 PTXAS bug on sm_121a) and Run B
-(no triton installed); only Run C produces numbers.
-
-## Tier 3 — External tool integration
-
-- **nvbench cross-validator** (`bench/nvbench_shim/`): C++ binary linking
-  NVIDIA's nvbench library, runs the same FP16 GEMM via cuBLASLt with
-  nvbench's built-in CUDA-event timing + L2 flush + statistical sampling.
-  If our Python harness diverges from nvbench's number by >3%, it flags a
-  bug in `_harness.py`. **Verified working on sm_121** (Risk Register concern
-  closed): nvbench builds cleanly with `CMAKE_CUDA_ARCHITECTURES=121`; FP16
-  GEMM 8192³ at 84.66 TFLOPs vs our Python harness's 86.19 TFLOPs (1.8% gap,
-  within ±3% threshold).
-- **Roofline / Nsight Compute** (`bench/roofline.py`): opt-in via
-  `BENCH_PROFILE=1`. Uses `ncu --set roofline` + `ncu_report==2025.3.1`
-  Python API to extract `sol_sm` and `sol_mem` percentages per kernel.
-  Verified on GB10 with Nsight Compute 2026.1.0: FP16 GEMM at sol_sm=75%,
-  sol_mem=52% — useful for calibrating `sol_config.toml` placeholders.
-
-## Tier 4 (experimental) — Full-stack end-to-end LLM
-
-**Out of scope for hardware benchmarking** — moved to `bench/experimental/`
-and not exercised by `run_bakeoff.sh`. These workloads measure software-stack
-throughput (vLLM scheduler, KV cache layout, tokenizer batching, attention
-engine choice) rather than GB10 hardware capability. Tiers 1-3 already cover
-the hardware-level questions this repo cares about.
-
-Kept as reference scaffolding for two adjacent research questions a future
-follow-up might pursue:
-
-- `bench/experimental/mlperf_llama31_8b.py` — MLPerf inference v5.1
-  `llama3_1-8b` wrapper using MLCommons' `mlcr` CLI inside
-  `ghcr.io/mlcommons/inference:5.1-dev`. Reports tokens/sec, TTFT, ITL p50/p99.
-  Gated by `BENCH_DOWNLOAD_MODELS=1` (16 GB HuggingFace download under Meta
-  Llama 3.1 Community License; `HF_TOKEN` required). Useful if you want
-  "first publicly-reported GB10 MLPerf v5.1 numbers" as a separate artifact.
-  **Note**: llama3.1-8b is v5.1-only (NOT in v5.0).
-- `bench/experimental/serve_flashinfer.py` — FlashInfer-Bench attention serving
-  via the authentic v0.1.2 API (`Benchmark + TraceSet + BenchmarkConfig`).
-  Requires FlashInfer source-built with `TORCH_CUDA_ARCH_LIST=12.1` (PyPI
-  wheels are sm_120-only); build via
-  `bench/experimental/build_flashinfer.sh` (~30-60 min cold).
-- `bench/experimental/run_e2e.sh` — driver script if you ever want to run both;
-  inherits the same clock-lock controller pattern as `run_bakeoff.sh`.
-
-## What this upgrade does NOT do
-
-The original "What this bench is not" caveats from the pre-upgrade methodology
-still apply for what we deliberately left out:
-
-- **Multi-GPU / NVLink-C2C** — DGX Spark is single-GPU only.
-- **Training throughput** — we benchmark inference + microkernels, not training.
-- **Power / perf-per-watt** — `nvidia-smi --query-gpu=power.draw` accuracy is
-  not calibrated on GB10.
-- **Public leaderboard submission** — local numbers only; no official MLPerf
-  submission or FlashInfer-Bench upload.
-- **cuBLASLt heuristic auto-tuning** — we use cuBLAS defaults.
-
-But the original limitations 1, 2, 3, 4, and 6 (clock lock, L2 flush, CUDA
-events, variance, correctness) are **all resolved** by Tier 1. Limitation 5
-(Triton untuned) is **resolved** by the Tier 2 `triton_autotuned` test
-(retained alongside `triton` for codegen comparison).
+- **Multi-GPU / NVLink-C2C** — DGX Spark is single-GPU.
+- **Training throughput** — inference + microkernels only.
+- **Power / perf-per-watt** — `nvidia-smi --query-gpu=power.draw` accuracy is not calibrated on GB10; `energy: false` in the optimum-benchmark configs.
+- **Public leaderboard submission** — local numbers only.
+- **cuBLASLt heuristic auto-tuning** — cuBLAS defaults.
+- **Per-shape Triton autotuning** — Triton is in the bench-base image but is not exercised as a separate measurement tier; the kernel bench uses `torch.matmul` / `torch._scaled_mm`, whose backend selection is left to PyTorch's dispatcher.

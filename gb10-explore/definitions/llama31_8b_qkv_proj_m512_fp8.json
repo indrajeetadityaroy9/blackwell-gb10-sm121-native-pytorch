@@ -1,0 +1,50 @@
+{
+  "name": "llama31_8b_qkv_proj_m512_fp8",
+  "op_type": "gemm",
+  "axes": {
+    "M": {
+      "type": "const",
+      "value": 512
+    },
+    "N": {
+      "type": "const",
+      "value": 12288
+    },
+    "K": {
+      "type": "const",
+      "value": 4096
+    }
+  },
+  "inputs": {
+    "A": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "float8_e4m3fn"
+    },
+    "B": {
+      "shape": [
+        "K",
+        "N"
+      ],
+      "dtype": "float8_e4m3fn"
+    }
+  },
+  "outputs": {
+    "C": {
+      "shape": [
+        "M",
+        "N"
+      ],
+      "dtype": "bfloat16"
+    }
+  },
+  "reference": "import torch\ndef run(A, B):\n    return (A.to(torch.float32) @ B.to(torch.float32)).to(torch.bfloat16)\n",
+  "validator_class": "matched_ratio",
+  "tags": [
+    "llama31_8b",
+    "qkv_proj",
+    "fp8"
+  ]
+}
