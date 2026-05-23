@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tune"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "torch",                  # provided by /work wheel via --force-reinstall, no version pin
+  "triton==3.7.0",
+  "pydantic>=2",
+  "httpx",
+  "openai>=1.30",
+  "ncu_report==2025.3.1",   # also provided by bench-base; declared here so import is unconditional
+  "numpy",
+]
+
+[project.scripts]
+tune-bench = "tune.bench:main"
+tune-run = "tune.tune:main"
+
+[tool.setuptools.packages.find]
+include = ["tune*"]

@@ -1,0 +1,16 @@
+{
+  "name": "reduction_sum_16m_fp32",
+  "op_type": "reduction",
+  "axes": {
+    "N": {"type": "const", "value": 16777216}
+  },
+  "inputs": {
+    "x": {"shape": ["N"], "dtype": "float32"}
+  },
+  "outputs": {
+    "y": {"shape": null, "dtype": "float32"}
+  },
+  "reference": "import torch\ndef run(x):\n    return x.sum()\n",
+  "validator_class": "deterministic",
+  "tags": ["reduction", "fp32"]
+}
