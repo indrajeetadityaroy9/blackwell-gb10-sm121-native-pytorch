@@ -127,6 +127,19 @@ class Definition(BaseModelWithDocstrings):
                     )
         return self
 
+    # Op taxonomy — single owner of op-type dispatch, read by correctness.py and ncu.py.
+    @property
+    def is_gemm(self) -> bool:
+        return self.op_type.lower() == "gemm"
+
+    @property
+    def is_reduction(self) -> bool:
+        return self.op_type.lower() in ("reduction", "reduce", "sum")
+
+    @property
+    def is_norm(self) -> bool:
+        return self.op_type.lower() in ("rmsnorm", "layernorm", "norm")
+
     @cached_property
     def const_axes(self) -> Dict[str, int]:
         return {n: ax.value for n, ax in self.axes.items() if isinstance(ax, AxisConst)}

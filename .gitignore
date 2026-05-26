@@ -7,3 +7,4 @@ research/
 docs/
 __pycache__/
 *.py[cod]
+_exp_runs/

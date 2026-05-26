@@ -1,15 +1,13 @@
-"""Timing + benchmark harness.
+"""FIB robust benchmark + CUDA-event timing — shared kernel-execution primitives
+(source loading, input materialization, timing). FlashInfer-Bench (arXiv:2601.00227 §4.3).
+
   bench(definition, source, workloads) -> [Evaluation]
   bench_reference(definition, workloads) -> [float]   (fast_p baseline latencies)
-CLI: python -m tune.bench --definition <name> --source <path>
 """
 
-import argparse
 import datetime as _dt
 import hashlib
 import importlib.util
-import json
-import os
 import statistics
 import sys
 import tempfile
@@ -20,8 +18,7 @@ import torch
 from torch import multiprocessing as mp
 from safetensors.torch import load_file
 
-from .data import (Definition, Evaluation, EvaluationStatus, Performance, Workload,
-                   env_snapshot, load_json_file)
+from .data import Evaluation, EvaluationStatus, Performance, env_snapshot
 from .data.workload import SafetensorsInput, ScalarInput
 from .validators import validate
 
@@ -82,6 +79,17 @@ def _load_run_callable(source, module_name):
     return fn
 
 
+def _rand(shape, dtype, generator=None):
+    """Shared random-input primitive (workload materialization + correctness sweeps).
+    fp32-then-cast keeps numerics aligned with the fp32 reference; fp8 clamps to its
+    representable range; integer dtypes get small positive ints."""
+    if dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
+        return torch.randn(*shape, generator=generator, device="cuda:0", dtype=torch.float32).to(dtype)
+    if dtype == torch.float8_e4m3fn:
+        return torch.randn(*shape, generator=generator, device="cuda:0", dtype=torch.float32).clamp(-448.0, 448.0).to(dtype)
+    return torch.randint(0, 127, tuple(shape), generator=generator, device="cuda:0", dtype=torch.int64).to(dtype)
+
+
 def _materialize_inputs(definition, workload):
     shapes = definition.get_input_shapes(dict(workload.axes))
     dtypes = definition.torch_input_dtypes
@@ -94,12 +102,8 @@ def _materialize_inputs(definition, workload):
             out.append(inp.value)
         elif isinstance(inp, SafetensorsInput):
             out.append(load_file(inp.path)[inp.tensor_key].to("cuda:0").to(dtype))
-        elif dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
-            out.append(torch.randn(*shape, generator=g, device="cuda:0", dtype=torch.float32).to(dtype))
-        elif dtype == torch.float8_e4m3fn:
-            out.append(torch.randn(*shape, generator=g, device="cuda:0", dtype=torch.float32).clamp(-448.0, 448.0).to(dtype))
         else:
-            out.append(torch.randint(0, 127, tuple(shape), generator=g, device="cuda:0", dtype=torch.int64).to(dtype))
+            out.append(_rand(shape, dtype, generator=g))
     return out
 
 
@@ -163,25 +167,3 @@ def bench_reference(definition, workloads):
     return out
 
 
-def _definitions_root():
-    return Path(os.environ.get("GB10_DEFINITIONS", "/opt/tune/definitions"))
-
-
-def _load_workloads(definition_name):
-    root = _definitions_root() / "workloads" / definition_name
-    return [load_json_file(Workload, p) for p in sorted(root.glob("*.json"))]
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Bench a kernel source against a Definition's workloads.")
-    ap.add_argument("--definition", required=True)
-    ap.add_argument("--source", required=True, type=Path)
-    args = ap.parse_args(argv)
-    defn = load_json_file(Definition, _definitions_root() / f"{args.definition}.json")
-    evals = bench(defn, args.source.read_text(), _load_workloads(args.definition))
-    print(json.dumps([json.loads(e.model_dump_json()) for e in evals], indent=2))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

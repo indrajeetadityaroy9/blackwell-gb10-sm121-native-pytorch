@@ -15,6 +15,8 @@ _HW_PEAK_BF16_TFLOPS = 125.0
 _HW_PEAK_BANDWIDTH_GBPS = 273.0
 
 
+# lru_cache: an 8192³ bf16 GEMM is invoked on every keep + final report — cache makes the
+# measurement once-per-process. Do not remove; the cost is otherwise paid each iteration.
 @functools.lru_cache(maxsize=1)
 def compute_peak_tflops():
     n = 8192

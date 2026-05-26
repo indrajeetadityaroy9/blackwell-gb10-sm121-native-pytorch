@@ -1,4 +1,4 @@
-"""Trace + Evaluation + ancillary metric structs."""
+"""Evaluation + ancillary metric structs (Correctness / Performance / Environment)."""
 
 import math
 from enum import Enum
@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .utils import BaseModelWithDocstrings, NonEmptyString
-from .workload import Workload
 
 
 class Correctness(BaseModelWithDocstrings):
@@ -84,21 +83,3 @@ class Evaluation(BaseModelWithDocstrings):
                     f"{self.status} must not include correctness/performance"
                 )
         return self
-
-
-class Trace(BaseModelWithDocstrings):
-    """Definition + Workload + (Solution, Evaluation) link."""
-
-    definition: NonEmptyString
-    workload: Workload
-    solution: Optional[str] = None
-    evaluation: Optional[Evaluation] = None
-
-    def is_workload_trace(self) -> bool:
-        return self.solution is None and self.evaluation is None
-
-    def is_successful(self) -> bool:
-        return (
-            not self.is_workload_trace()
-            and self.evaluation.status == EvaluationStatus.PASSED
-        )

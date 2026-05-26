@@ -19,7 +19,6 @@ dependencies = [
 ]
 
 [project.scripts]
-tune-bench = "tune.bench:main"
 tune-run = "tune.tune:main"
 
 [tool.setuptools.packages.find]

@@ -7,21 +7,7 @@ Schema additions over FIB:
 
 from .definition import AxisConst, AxisSpec, AxisVar, Definition, DType, TensorSpec
 from .json_utils import load_json_file, save_json_file
-from .solution import (
-    BuildSpec,
-    Solution,
-    SourceFile,
-    SupportedBindings,
-    SupportedLanguages,
-)
-from .trace import (
-    Correctness,
-    Environment,
-    Evaluation,
-    EvaluationStatus,
-    Performance,
-    Trace,
-)
+from .trace import Correctness, Environment, Evaluation, EvaluationStatus, Performance
 from .utils import (
     BaseModelWithDocstrings,
     NonEmptyString,
@@ -36,7 +22,6 @@ __all__ = [
     "AxisSpec",
     "AxisVar",
     "BaseModelWithDocstrings",
-    "BuildSpec",
     "Correctness",
     "Definition",
     "DType",
@@ -50,12 +35,7 @@ __all__ = [
     "RandomInput",
     "SafetensorsInput",
     "ScalarInput",
-    "Solution",
-    "SourceFile",
-    "SupportedBindings",
-    "SupportedLanguages",
     "TensorSpec",
-    "Trace",
     "Workload",
     "dtype_str_to_torch_dtype",
     "env_snapshot",

@@ -1,4 +1,5 @@
-"""FIB fast_p AUC: trapezoidal integral of fraction(correct & speedup>p) over p in [0, p_max]."""
+"""FIB fast_p AUC (FlashInfer-Bench, arXiv:2601.00227 §4.2): trapezoidal integral of
+fraction(correct & speedup>p) over p in [0, p_max]."""
 
 import statistics
 

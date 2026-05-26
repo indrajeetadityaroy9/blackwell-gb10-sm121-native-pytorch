@@ -1,5 +1,7 @@
-"""Swarm of RecursiveMAS Qwen specialists, loaded in-process via transformers + the
-vendored latent-link adapters (modeling.py) and adapter-file resolver (hf_resolver.py).
+"""Swarm of RecursiveMAS Qwen specialists (Inner/Outer latent links, arXiv:2604.25917)
+with GEPA reflection-driven escalation (arXiv:2507.19457). Loaded in-process via
+transformers + the vendored latent-link adapters (modeling.py) and adapter-file resolver
+(hf_resolver.py).
 
 use_mixture=False (A/B/C): Distillation-Learner-4B proposes; Distillation-Expert-9B on escalation.
 use_mixture=True  (D):     Mixture-Code-3B (Inner Link r=3) → Outer Link → Mixture-Summarizer-2B decodes.

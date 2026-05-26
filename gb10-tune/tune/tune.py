@@ -1,11 +1,12 @@
-"""Canonical keep/revert loop for sm_121a kernel synthesis. All four configs run this:
+"""Canonical AutoKernel keep/revert loop (arXiv:2603.21331 §4) for sm_121a kernel
+synthesis. All four configs run this:
   A Learner-only  --use-mixture=False --k-expert=999999
   B Expert-only   --use-mixture=False --k-expert=0
   C Distillation  --use-mixture=False --k-expert=5
   D Full swarm    --use-mixture=True  --k-expert=5
-Reward = fast_p AUC vs eager baseline. Keep if AUC improves > 1%; else discard.
-Move-on at 5 consecutive reverts or 2× raw speedup. State is a single in-memory
-best_source string — no git."""
+Reward = fast_p AUC vs eager baseline. Keep if AUC improves > 3% (2× the ~1.5%
+run-to-run median drift); else discard. Move-on at 5 consecutive reverts or 2× raw
+speedup. State is a single in-memory best_source string — no git."""
 
 import argparse
 import json

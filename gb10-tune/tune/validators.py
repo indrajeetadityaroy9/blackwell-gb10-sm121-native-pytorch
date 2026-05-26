@@ -1,6 +1,6 @@
-"""Per-dtype correctness validators selected by Definition.validator_class:
-deterministic (elementwise, dtype-specific atol), matched_ratio / matched_ratio_loose
-(FP8/FP4 ratio rule), stochastic (TVD vs reference distribution). Compared in float32."""
+"""FIB 3-class robust correctness (FlashInfer-Bench, arXiv:2601.00227 §5), selected by
+Definition.validator_class: deterministic (elementwise, dtype-specific atol), matched_ratio
+/ matched_ratio_loose (FP8/FP4 ratio rule), stochastic (TVD vs reference). Compared in fp32."""
 
 from dataclasses import dataclass
 
