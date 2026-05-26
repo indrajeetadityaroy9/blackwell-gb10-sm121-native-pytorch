@@ -70,14 +70,7 @@ NGC ships triton 3.6.0 (the only stack where the Triton matmul test succeeds on 
 
 # Layer 2 — Adapting AI-kernel-optimization mechanisms for sm_121a (research, WIP)
 
-`gb10-tune/` runs on top of the native wheel. The novel angle is **domain-specific adaptation**: taking the mechanisms from four recent papers and specializing them for GB10 / sm_121a hardware utilization, rather than applying any of them off-the-shelf.
-
-| Paper | Mechanism drawn on |
-|---|---|
-| **FlashInfer-Bench** ([2601.00227](https://arxiv.org/abs/2601.00227)) | Trace schema (Definition / Workload / Solution / Evaluation), the `fast_p` correctness-and-speed metric, robust multi-class benchmark |
-| **AutoKernel** ([2603.21331](https://arxiv.org/abs/2603.21331)) | Single-agent keep/revert loop, 5-stage correctness harness, tiered playbook (extended with an sm_121a tier: TMEM, 2-CTA MMA, `tcgen05`, the 101376-byte SMEM cap) |
-| **RecursiveMAS** ([2604.25917](https://arxiv.org/abs/2604.25917)) | Inner/Outer latent links and multi-agent collaboration patterns |
-| **GEPA** ([2507.19457](https://arxiv.org/abs/2507.19457)) | Reflective search via Actionable Side Information (full execution traces fed back to the proposer) |
+`gb10-tune/` runs on top of the native wheel.
 
 clock-locked benchmarking (`gb10-tune/run_tune.sh`, NVML 2418 MHz), per-iteration CUDA-event timing (~10% stdev), `fast_p` AUC scoring, a visible/held-out workload split for contamination resistance, on-device roofline classification, and `% of theoretical hardware peak` reporting with clock provenance in every result.
 
