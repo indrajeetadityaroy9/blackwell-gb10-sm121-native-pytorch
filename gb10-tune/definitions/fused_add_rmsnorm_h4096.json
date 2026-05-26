@@ -1,0 +1,20 @@
+{
+  "name": "fused_add_rmsnorm_h4096",
+  "op_type": "rmsnorm",
+  "axes": {
+    "M": {"type": "const", "value": 4096},
+    "H": {"type": "const", "value": 4096}
+  },
+  "inputs": {
+    "x": {"shape": ["M", "H"], "dtype": "bfloat16"},
+    "residual": {"shape": ["M", "H"], "dtype": "bfloat16"},
+    "weight": {"shape": ["H"], "dtype": "bfloat16"}
+  },
+  "outputs": {
+    "y": {"shape": ["M", "H"], "dtype": "bfloat16"}
+  },
+  "reference": "import torch\ndef run(x, residual, weight):\n    h = x.float() + residual.float()\n    var = h.pow(2).mean(-1, keepdim=True)\n    h = h * torch.rsqrt(var + 1e-6)\n    return (h * weight.float()).to(x.dtype)\n",
+  "perf_baseline": "import torch\ndef run(x, residual, weight):\n    h = x + residual\n    var = h.pow(2).mean(-1, keepdim=True)\n    h = h * torch.rsqrt(var + 1e-6)\n    return h * weight\n",
+  "validator_class": "deterministic",
+  "tags": ["fused_add_rmsnorm", "h4096", "bf16", "memory_bound"]
+}

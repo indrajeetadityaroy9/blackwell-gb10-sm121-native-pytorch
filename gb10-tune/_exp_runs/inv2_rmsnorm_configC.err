@@ -1,0 +1,7 @@
+[run_tune] GPU clock locked at 2418 MHz (applications.gr=2418)
+/usr/local/lib/python3.12/dist-packages/huggingface_hub/constants.py:277: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:  50%|████▉     | 212/426 [00:00<00:00, 2104.45it/s]Loading weights:  99%|█████████▉| 423/426 [00:00<00:00, 1944.09it/s]Loading weights: 100%|██████████| 426/426 [00:00<00:00, 1968.52it/s]
+Loading weights:   0%|          | 0/427 [00:00<?, ?it/s]Loading weights:   0%|          | 1/427 [00:00<01:28,  4.81it/s]Loading weights:  19%|█▉        | 83/427 [00:00<00:01, 289.11it/s]Loading weights:  93%|█████████▎| 397/427 [00:00<00:00, 1236.68it/s]Loading weights: 100%|██████████| 427/427 [00:00<00:00, 880.54it/s] 

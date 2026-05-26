@@ -1,0 +1,8 @@
+{
+  "axes": {},
+  "inputs": {
+    "A": { "type": "random" },
+    "B": { "type": "random" }
+  },
+  "uuid": "qkv_m512_bf16_wl04"
+}

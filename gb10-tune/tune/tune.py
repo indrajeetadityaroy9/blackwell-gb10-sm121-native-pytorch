@@ -1,147 +1,156 @@
-"""Top-level orchestrator: Stage 0 → Stage 1 → Stage 2.
-
-Single canonical execution path. Stage 2 always runs; pass `--max-stage2-iters 0`
-to make its loop body execute zero times (no separate branch).
-"""
-
-from __future__ import annotations
+"""Canonical keep/revert loop for sm_121a kernel synthesis. All four configs run this:
+  A Learner-only  --use-mixture=False --k-expert=999999
+  B Expert-only   --use-mixture=False --k-expert=0
+  C Distillation  --use-mixture=False --k-expert=5
+  D Full swarm    --use-mixture=True  --k-expert=5
+Reward = fast_p AUC vs eager baseline. Keep if AUC improves > 1%; else discard.
+Move-on at 5 consecutive reverts or 2× raw speedup. State is a single in-memory
+best_source string — no git."""
 
 import argparse
+import json
+import os
+import random
+import statistics
+import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
-from .attempt_memory import AttemptMemory
-from .bench import bench_solution
-from .bottleneck import classify
-from .data import EvaluationStatus
-from .loop_helpers import (
-    _build_solution_for_runner,
-    ncu_profile_subprocess,
-    promote_to_traces,
-)
-from .stage1 import CandidateResult, run_stage1
-from .stage2 import Stage2Best, run_stage2
-from .trace import TRACES_ROOT, load_definition
+from .bench import bench, bench_reference
+from .correctness import run_5_stage
+from .data import Definition, EvaluationStatus, Workload, load_json_file
+from .fast_p import fast_p_auc, median_speedup
+from .ncu import flops_and_bytes, roofline_tier
+from .peak import utilization
+from .swarm import Swarm
 
 
-@dataclass
-class TuneResult:
-    baseline_runtime_ms: float
-    stage1_count: int
-    stage1_correct: int
-    stage1_best_runtime_ms: float
-    stage1_best_params: Optional[tuple]
-    final_runtime_ms: float
-    final_source: str
-    overall_speedup: float
+def _utilization(definition, evals, tier):
+    """Achieved throughput + % of peak from the median PASSED latency."""
+    fb = flops_and_bytes(definition)
+    lats = [e.performance.latency_ms for e in evals if e.status == EvaluationStatus.PASSED]
+    return utilization(definition, fb[0], fb[1], statistics.median(lats), tier)
 
 
-def tune(
-    definition_name: str,
-    baseline_path: Path,
-    llm_endpoint: str,
-    llm_model: str,
-    max_stage2_iters: int = 30,
-) -> TuneResult:
-    definition = load_definition(definition_name)
-    baseline_src = baseline_path.read_text()
-    memory = AttemptMemory()
-
-    # Stage 0: baseline bench + NCU + classify.
-    baseline_sol = _build_solution_for_runner(definition, baseline_src)
-    baseline_ev = bench_solution(definition, baseline_sol, run_ncu=False)
-    if baseline_ev.status != EvaluationStatus.PASSED:
-        raise RuntimeError(f"Baseline failed: {baseline_ev.status} — {baseline_ev.extra_msg}")
-    baseline_ncu = ncu_profile_subprocess(baseline_src, definition)
-    report = classify(baseline_ncu, op_type=definition.op_type)
-
-    # Stage 1: deterministic template-grid sweep.
-    stage1_results = run_stage1(definition, report.allowed_action, memory)
-    correct = [r for r in stage1_results if r.correct]
-    if correct:
-        stage1_best_cand = min(correct, key=lambda r: r.runtime_ms)
-    else:
-        stage1_best_cand = None
-
-    # Pick the best of (baseline, stage1_best) as Stage 2's starting point.
-    baseline_runtime = baseline_ev.performance.latency_ms
-    if stage1_best_cand is not None and stage1_best_cand.runtime_ms < baseline_runtime:
-        s2_start = Stage2Best(
-            source=stage1_best_cand.source,
-            runtime_ms=stage1_best_cand.runtime_ms,
-            evaluation=stage1_best_cand.evaluation,
-        )
-    else:
-        s2_start = Stage2Best(
-            source=baseline_src,
-            runtime_ms=baseline_runtime,
-            evaluation=baseline_ev,
-        )
-
-    # Stage 2: LLM exploration (zero iters if max_stage2_iters=0 — same code path).
-    final = run_stage2(
-        definition=definition,
-        initial_best=s2_start,
-        attempt_memory=memory,
-        llm_endpoint=llm_endpoint,
-        llm_model=llm_model,
-        max_iters=max_stage2_iters,
-    )
-
-    promote_to_traces(definition, final.source, TRACES_ROOT)
-
-    result = TuneResult(
-        baseline_runtime_ms=baseline_runtime,
-        stage1_count=len(stage1_results),
-        stage1_correct=len(correct),
-        stage1_best_runtime_ms=(stage1_best_cand.runtime_ms if stage1_best_cand else 0.0),
-        stage1_best_params=(stage1_best_cand.parameter_tuple if stage1_best_cand else None),
-        final_runtime_ms=final.runtime_ms,
-        final_source=final.source,
-        overall_speedup=baseline_runtime / final.runtime_ms,
-    )
-    _print_report(definition_name, report, result, memory)
-    return result
+def _gpu_clock_mhz():
+    # Provenance: the actual locked clock this run measured at. With clocks floating,
+    # latency varies ~30% and all speedups are noise; results must record the lock.
+    out = subprocess.run(["nvidia-smi", "--query-gpu=clocks.applications.gr",
+                          "--format=csv,noheader,nounits"], capture_output=True, text=True)
+    return int(out.stdout.splitlines()[0].strip())
 
 
-def _print_report(definition_name: str, report, result: TuneResult, memory: AttemptMemory) -> None:
-    print(f"=== tune: {definition_name} ===")
-    print()
-    print(f"Baseline runtime:        {result.baseline_runtime_ms:.4f} ms")
-    print(f"Baseline bottleneck:     {report.bottleneck_type}")
-    print(f"  memory throughput:     {report.evidence.memory_throughput_pct:.1f}%")
-    print(f"  SM throughput:         {report.evidence.sm_throughput_pct:.1f}%")
-    print(f"  load efficiency:       {report.evidence.load_efficiency_pct:.1f}%")
-    print()
-    print(f"Stage 1 (template sweep): {result.stage1_correct}/{result.stage1_count} correct")
-    print(f"  best runtime:          {result.stage1_best_runtime_ms:.4f} ms")
-    print(f"  best params:           {result.stage1_best_params}")
-    print()
-    print(f"Stage 2 (LLM exploration): {len(memory.attempted_sources)} candidates evaluated")
-    print(f"  final runtime:         {result.final_runtime_ms:.4f} ms")
-    print()
-    print(f"Overall speedup:         {result.overall_speedup:.2f}x")
-    print(f"  ({result.baseline_runtime_ms:.4f} ms → {result.final_runtime_ms:.4f} ms)")
+def _definitions_root():
+    return Path(os.environ.get("GB10_DEFINITIONS", "/opt/tune/definitions"))
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Unified two-stage Triton kernel tuner")
+def _runs_root():
+    return Path(os.environ.get("GB10_RUNS", "/workspace/runs"))
+
+
+def _load_workloads(definition_name):
+    root = _definitions_root() / "workloads" / definition_name
+    return [load_json_file(Workload, p) for p in sorted(root.glob("*.json"))]
+
+
+def _partition_workloads(workloads, seed=0):
+    rng = random.Random(seed)
+    shuffled = list(workloads)
+    rng.shuffle(shuffled)
+    split = max(1, int(len(shuffled) * 0.8))
+    return shuffled[:split], shuffled[split:]
+
+
+def tune(definition_name, baseline_path, max_iters, k_expert, use_mixture):
+    definition = load_json_file(Definition, _definitions_root() / f"{definition_name}.json")
+    all_workloads = _load_workloads(definition_name)
+    if not all_workloads:
+        raise RuntimeError(f"no workloads under definitions/workloads/{definition_name}/")
+    visible, heldout = _partition_workloads(all_workloads)
+
+    swarm = Swarm(use_mixture=use_mixture)
+    candidates_dir = _runs_root() / definition_name / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline_ms_visible = bench_reference(definition, visible)
+    baseline_ms_heldout = bench_reference(definition, heldout)
+
+    best_source = baseline_path.read_text()
+    best_evals = bench(definition, best_source, visible)
+    best_auc_visible = fast_p_auc(best_evals, baseline_ms_visible, p_max=2.0)
+    best_speedup = median_speedup(best_evals, baseline_ms_visible)
+    tier = roofline_tier(definition)  # static (arithmetic intensity), constant per Definition
+
+    asi_records = []  # GEPA ASI: {source, failure diagnostic} fed back to the proposer
+    iterations = []
+    n_revert = 0
+
+    for i in range(max_iters):
+        used_expert = n_revert >= k_expert
+        if used_expert:
+            candidate = swarm.expert_propose(definition, best_source, asi_records)
+            n_revert = 0
+        else:
+            candidate = swarm.propose(definition, best_source, tier, asi_records)
+        (candidates_dir / f"iter_{i}.py").write_text(candidate)
+
+        ok, reason = run_5_stage(candidate, definition)
+        if not ok:
+            n_revert += 1
+            asi_records.append({"iter": i, "source": candidate[:1000], "failure": reason})
+            iterations.append({"iter": i, "decision": "revert", "reason": reason[:120], "used_expert": used_expert})
+            continue
+
+        evals = bench(definition, candidate, visible)
+        auc = fast_p_auc(evals, baseline_ms_visible, p_max=2.0)
+
+        # Keep only if clearly above the measurement floor: with clocks locked + per-iter
+        # timing, run-to-run median drift is ~1.5%, so require a 3% AUC gain (2× margin).
+        if auc > best_auc_visible * 1.03:
+            best_source, best_auc_visible = candidate, auc
+            best_speedup = median_speedup(evals, baseline_ms_visible)
+            n_revert = 0
+            util = _utilization(definition, evals, tier)
+            iterations.append({"iter": i, "decision": "keep", "auc": auc, "speedup": best_speedup,
+                               "used_expert": used_expert,
+                               **({"pct_of_hw_peak": util["pct_of_hw_peak"]} if "pct_of_hw_peak" in util else {})})
+        else:
+            n_revert += 1
+            spd = median_speedup(evals, baseline_ms_visible)
+            tname = {2: "compute", 1: "memory"}.get(tier, "latency")
+            asi_records.append({"iter": i, "source": candidate[:1000],
+                                "failure": f"correct but not faster: auc {auc:.4f} <= best {best_auc_visible:.4f}, "
+                                           f"speedup {spd:.3f} (need > best). {tname}-bound."})
+            iterations.append({"iter": i, "decision": "revert", "auc": auc, "used_expert": used_expert})
+
+        if n_revert >= 5 or best_speedup >= 2.0:
+            break
+
+    final_evals = bench(definition, best_source, heldout)
+    return {
+        "definition": definition_name,
+        "use_mixture": use_mixture,
+        "k_expert": k_expert,
+        "best_auc_visible": best_auc_visible,
+        "best_speedup_visible": best_speedup,
+        "final_auc_heldout": fast_p_auc(final_evals, baseline_ms_heldout, p_max=2.0),
+        "roofline_tier": tier,
+        "gpu_clock_mhz": _gpu_clock_mhz(),  # provenance — trust numbers only if locked
+        "utilization": _utilization(definition, final_evals, tier),
+        "iterations": iterations,
+        "final_source": best_source,
+    }
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
     ap.add_argument("--definition", required=True)
     ap.add_argument("--baseline", required=True, type=Path)
-    ap.add_argument("--llm-endpoint", required=True)
-    ap.add_argument("--llm-model", required=True)
-    ap.add_argument("--max-stage2-iters", type=int, default=30)
+    ap.add_argument("--max-iters", type=int, default=30)
+    ap.add_argument("--k-expert", type=int, default=5)
+    ap.add_argument("--use-mixture", type=lambda s: s.lower() in ("1", "true", "yes"), default=True)
     args = ap.parse_args(argv)
-
-    tune(
-        definition_name=args.definition,
-        baseline_path=args.baseline,
-        llm_endpoint=args.llm_endpoint,
-        llm_model=args.llm_model,
-        max_stage2_iters=args.max_stage2_iters,
-    )
+    print(json.dumps(tune(args.definition, args.baseline, args.max_iters, args.k_expert, args.use_mixture), indent=2))
     return 0
 
 

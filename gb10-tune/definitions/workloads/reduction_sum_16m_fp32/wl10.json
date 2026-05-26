@@ -1,0 +1,7 @@
+{
+  "axes": {},
+  "inputs": {
+    "x": { "type": "random" }
+  },
+  "uuid": "redsum_16m_fp32_wl10"
+}

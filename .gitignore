@@ -5,3 +5,5 @@ bench/build/
 *.whl
 research/
 docs/
+__pycache__/
+*.py[cod]

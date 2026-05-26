@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from .utils import BaseModelWithDocstrings, NonEmptyString, NonNegativeInt, dtype_str_to_torch_dtype
 
 # GB10 validator dispatch — selects the per-dtype evaluator (spec §5).
-ValidatorClass = Literal["deterministic", "matched_ratio", "matched_ratio_loose"]
+ValidatorClass = Literal["deterministic", "matched_ratio", "matched_ratio_loose", "stochastic"]
 
 
 class AxisConst(BaseModelWithDocstrings):
@@ -69,6 +69,14 @@ class Definition(BaseModelWithDocstrings):
     inputs: Dict[NonEmptyString, TensorSpec]
     outputs: Dict[NonEmptyString, TensorSpec]
     reference: NonEmptyString
+    perf_baseline: Optional[str] = None
+    """Optional native-dtype eager baseline for fast_p speedup timing (defines `run`).
+
+    `reference` is the correctness oracle (e.g., fp32-accumulated matmul) and must stay
+    high-precision. fast_p speedup, however, must be measured against the realistic
+    competitive baseline — PyTorch eager / cuBLAS in native dtype — per KernelBench and
+    FlashInfer-Bench. When None, fast_p falls back to `reference` (correct only when the
+    reference is already the native-dtype eager op, e.g., a reduction `x.sum()`)."""
     validator_class: ValidatorClass = "deterministic"
     tags: List[NonEmptyString] = Field(default_factory=list)
     description: Optional[str] = Field(default=None)
@@ -82,6 +90,15 @@ class Definition(BaseModelWithDocstrings):
         )
         if not has_run:
             raise ValueError("Reference must define a top-level function named 'run'")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_perf_baseline_code(self) -> "Definition":
+        if self.perf_baseline is None:
+            return self
+        mod = ast.parse(self.perf_baseline, mode="exec")
+        if not any(isinstance(n, ast.FunctionDef) and n.name == "run" for n in mod.body):
+            raise ValueError("perf_baseline must define a top-level function named 'run'")
         return self
 
     @model_validator(mode="after")

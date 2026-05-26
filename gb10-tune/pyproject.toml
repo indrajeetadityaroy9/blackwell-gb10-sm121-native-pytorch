@@ -6,14 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "tune"
 version = "0.1.0"
 requires-python = ">=3.12"
+# Every runtime dependency listed explicitly so imports never need availability guards.
+# torch is force-reinstalled from the native sm_121 /work wheel (no version pin).
 dependencies = [
-  "torch",                  # provided by /work wheel via --force-reinstall, no version pin
+  "torch",
   "triton==3.7.0",
   "pydantic>=2",
-  "httpx",
-  "openai>=1.30",
-  "ncu_report==2025.3.1",   # also provided by bench-base; declared here so import is unconditional
-  "numpy",
+  "transformers>=5.9",      # qwen3_5_text arch needs >=5.9
+  "accelerate>=1.0",        # transformers model loading
+  "safetensors",            # SafetensorsInput workloads
+  "huggingface_hub>=0.24",  # snapshot_download of cached checkpoints
 ]
 
 [project.scripts]

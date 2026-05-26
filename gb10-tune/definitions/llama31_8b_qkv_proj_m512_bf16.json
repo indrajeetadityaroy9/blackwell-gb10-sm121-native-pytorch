@@ -41,6 +41,7 @@
     }
   },
   "reference": "import torch\ndef run(A, B):\n    return (A.float() @ B.float()).to(A.dtype)\n",
+  "perf_baseline": "import torch\ndef run(A, B):\n    return torch.matmul(A, B)\n",
   "validator_class": "deterministic",
   "tags": [
     "llama31_8b",

@@ -1,0 +1,216 @@
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.2.0
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+{
+  "definition": "llama31_8b_qkv_proj_m512_bf16",
+  "use_mixture": true,
+  "k_expert": 5,
+  "best_auc_visible": 0.55625,
+  "best_speedup_visible": 1.1012842628135702,
+  "final_auc_heldout": 0.525,
+  "roofline_tier": 2,
+  "utilization": {
+    "achieved_tflops": 74.07670431058627,
+    "achieved_gbps": 168.79457362438276,
+    "pct_of_hw_peak": 0.5926136344846902,
+    "pct_of_cublas": 0.89723610829625,
+    "peak_basis": "bf16 TFLOPs (hw=125 est.)"
+  },
+  "iterations": [
+    {
+      "iter": 0,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 1,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 2,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 3,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 4,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 5,
+      "decision": "revert",
+      "reason": "smoke gemm 128^3 seed0: INCORRECT_NUMERICAL matched_ratio=0.0014 < 1.0 (max_abs=47.75, max_rel=1)",
+      "used_expert": true
+    },
+    {
+      "iter": 6,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 7,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 8,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 9,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 10,
+      "decision": "revert",
+      "reason": "smoke gemm 128^3 seed0: INCORRECT_NUMERICAL matched_ratio=0.0014 < 1.0 (max_abs=47.75, max_rel=1)",
+      "used_expert": true
+    },
+    {
+      "iter": 11,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 12,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 13,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 14,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 15,
+      "decision": "revert",
+      "auc": 0.49375,
+      "used_expert": true
+    },
+    {
+      "iter": 16,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 17,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 18,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 19,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 20,
+      "decision": "revert",
+      "reason": "smoke gemm 128^3 seed0: INCORRECT_NUMERICAL matched_ratio=0.0014 < 1.0 (max_abs=47.75, max_rel=1)",
+      "used_expert": true
+    },
+    {
+      "iter": 21,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 22,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 23,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 24,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 25,
+      "decision": "keep",
+      "auc": 0.55625,
+      "speedup": 1.1012842628135702,
+      "used_expert": true,
+      "pct_of_hw_peak": 0.5990261160124557
+    },
+    {
+      "iter": 26,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 27,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 28,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    },
+    {
+      "iter": 29,
+      "decision": "revert",
+      "reason": "compile: SyntaxError: invalid syntax (_tune_candidate_0f1491808840.py, line 1)",
+      "used_expert": false
+    }
+  ],
+  "final_source": "\"\"\"BF16/FP16 GEMM seed kernel \u2014 tiled Triton matmul with Group-M tiling.\n\nAnchor: BLOCK 128x128x64, num_warps=8, num_stages=3, GROUP_M=8 \u2192 ~79.6 TFLOPs at\nqkv_proj M=512 FP16/BF16 on GB10 sm_121a (spec \u00a71). Beats cuBLAS Lt's 72.9.\n\"\"\"\n\nimport torch\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef _gemm_kernel(\n    a_ptr, b_ptr, c_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    BLOCK_M: tl.constexpr,\n    BLOCK_N: tl.constexpr,\n    BLOCK_K: tl.constexpr,\n    GROUP_M: tl.constexpr,\n):\n    # Group-M tiling: re-order pids so each group of GROUP_M m-tiles shares N reuse.\n    pid = tl.program_id(0)\n    num_pid_m = tl.cdiv(M, BLOCK_M)\n    num_pid_n = tl.cdiv(N, BLOCK_N)\n    num_pid_in_group = GROUP_M * num_pid_n\n    group_id = pid // num_pid_in_group\n    first_pid_m = group_id * GROUP_M\n    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)\n    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)\n    pid_n = (pid % num_pid_in_group) // group_size_m\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_k = tl.arange(0, BLOCK_K)\n\n    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak\n    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n    for k in range(0, tl.cdiv(K, BLOCK_K)):\n        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)\n        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)\n        acc += tl.dot(a, b)\n        a_ptrs += BLOCK_K * stride_ak\n        b_ptrs += BLOCK_K * stride_bk\n\n    c = acc.to(c_ptr.dtype.element_ty)\n    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn\n    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n    tl.store(c_ptrs, c, mask=c_mask)\n\n\ndef run(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n    M, K = A.shape\n    K2, N = B.shape\n    assert K == K2, f\"K mismatch: A.shape={A.shape}, B.shape={B.shape}\"\n    C = torch.empty((M, N), device=A.device, dtype=A.dtype)\n    BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 128, 64, 8\n    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)\n    _gemm_kernel[grid](\n        A, B, C,\n        M, N, K,\n        A.stride(0), A.stride(1),\n        B.stride(0), B.stride(1),\n        C.stride(0), C.stride(1),\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, GROUP_M=GROUP_M,\n        num_warps=8, num_stages=3,\n    )\n    return C"
+}

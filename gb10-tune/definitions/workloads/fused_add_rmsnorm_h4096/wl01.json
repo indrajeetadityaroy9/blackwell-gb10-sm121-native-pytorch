@@ -1,0 +1,9 @@
+{
+  "axes": {},
+  "inputs": {
+    "x": { "type": "random" },
+    "residual": { "type": "random" },
+    "weight": { "type": "random" }
+  },
+  "uuid": "rms_add_h4096_wl01"
+}

@@ -1,24 +1,29 @@
-# Tuner (Stage 0/1/2 orchestrator). Extends dgx-spark-bench-base:cuda13.2.
-# Build context: gb10-tune/  (NOT repo root)
+# Swarm-distillation kernel tuner. Extends dgx-spark-bench-base:cuda13.2.
+# Build context: gb10-tune/
 ARG BENCH_BASE=dgx-spark-bench-base:cuda13.2
 FROM ${BENCH_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# python3-dev is required by Triton's runtime CC (compile_module_from_src needs Python.h).
-# bench-base ships triton>=3.6 but lacks python3-dev — without it Triton kernels fail to compile.
+# python3-dev required by Triton's runtime CC. python-is-python3 makes `python`
+# resolve to `python3` for interactive use.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl jq python3-dev && \
+      ca-certificates curl jq python3-dev python-is-python3 && \
     rm -rf /var/lib/apt/lists/*
 
-# Bump triton to 3.7.0 (verified working on sm_121a per spec §1) and add the agent deps.
+# triton==3.7.0 verified on sm_121a; HF Transformers stack hosts the swarm in-process
+# (Distillation-Learner-4B, Distillation-Expert-9B, Mixture-Code-3B, Mixture-Summarizer-2B,
+# Mixture-Outerlinks) so no separate inference container is needed.
+# transformers>=5.9 required: the RecursiveMAS Qwen3.5 checkpoints declare
+# model_type "qwen3_5_text", unrecognized by 4.x.
 RUN uv pip install --system --no-cache \
-      "triton==3.7.0" "httpx" "openai>=1.30" "pydantic>=2"
+      "triton==3.7.0" "pydantic>=2" \
+      "transformers>=5.9" "accelerate>=1.0" "safetensors" "huggingface_hub>=0.24"
 
 COPY pyproject.toml /opt/tune/
-COPY tune       /opt/tune/tune/
-COPY kernels       /opt/tune/kernels/
-COPY definitions   /opt/tune/definitions/
+COPY tune           /opt/tune/tune/
+COPY kernels        /opt/tune/kernels/
+COPY definitions    /opt/tune/definitions/
 
 RUN uv pip install --system --no-cache --no-deps -e /opt/tune
 
@@ -26,5 +31,12 @@ ENV PYTHONUNBUFFERED=1
 ENV GB10_RUNS=/workspace/runs
 ENV GB10_DEFINITIONS=/opt/tune/definitions
 ENV GB10_TRACES=/workspace/traces
+ENV HF_HOME=/root/.cache/huggingface
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# gb10-swarm-cache named volume is mounted at /root/.cache/huggingface at run time
+# (docker run -v gb10-swarm-cache:/root/.cache/huggingface ...). Declared as a VOLUME
+# so a missing mount produces an anonymous volume rather than writing into the image layer.
+VOLUME /root/.cache/huggingface
 
 CMD ["sleep", "infinity"]
